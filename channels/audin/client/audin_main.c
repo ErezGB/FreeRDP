@@ -703,17 +703,12 @@ static UINT audin_register_device_plugin(IWTSPlugin* pPlugin, IAudinDevice* devi
  *
  * @return 0 on success, otherwise a Win32 error code
  */
-static UINT audin_load_device_plugin(IWTSPlugin* pPlugin, const char* name, ADDIN_ARGV* args)
+static UINT audin_load_device_plugin(AUDIN_PLUGIN* audin, char* name, ADDIN_ARGV* args)
 {
 	PFREERDP_AUDIN_DEVICE_ENTRY entry;
 	FREERDP_AUDIN_DEVICE_ENTRY_POINTS entryPoints;
-	AUDIN_PLUGIN* audin = (AUDIN_PLUGIN*)pPlugin;
 	UINT error;
-
-	if (!audin_process_addin_args(audin, args))
-		return CHANNEL_RC_INITIALIZATION_ERROR;
-
-	entry = (PFREERDP_AUDIN_DEVICE_ENTRY) freerdp_load_channel_addin_entry("audin", (LPSTR) name, NULL,
+	entry = (PFREERDP_AUDIN_DEVICE_ENTRY) freerdp_load_channel_addin_entry("audin", name, NULL,
 	        0);
 
 	if (entry == NULL)
@@ -724,10 +719,10 @@ static UINT audin_load_device_plugin(IWTSPlugin* pPlugin, const char* name, ADDI
 		return ERROR_INVALID_FUNCTION;
 	}
 
-	entryPoints.plugin = pPlugin;
+	entryPoints.plugin = (IWTSPlugin*) audin;
 	entryPoints.pRegisterAudinDevice = audin_register_device_plugin;
 	entryPoints.args = args;
-	entryPoints.rdpcontext = ((AUDIN_PLUGIN*)pPlugin)->rdpcontext;
+	entryPoints.rdpcontext = audin->rdpcontext;
 
 	if ((error = entry(&entryPoints)))
 	{
@@ -744,7 +739,7 @@ static UINT audin_load_device_plugin(IWTSPlugin* pPlugin, const char* name, ADDI
  *
  * @return 0 on success, otherwise a Win32 error code
  */
-static UINT audin_set_subsystem(AUDIN_PLUGIN* audin, char* subsystem)
+static UINT audin_set_subsystem(AUDIN_PLUGIN* audin, const char* subsystem)
 {
 	free(audin->subsystem);
 	audin->subsystem = _strdup(subsystem);
@@ -943,7 +938,7 @@ UINT DVCPluginEntry(IDRDYNVC_ENTRY_POINTS* pEntryPoints)
 
 	if (audin->subsystem)
 	{
-		if ((error = audin_load_device_plugin((IWTSPlugin*) audin, audin->subsystem, args)))
+		if ((error = audin_load_device_plugin(audin, audin->subsystem, args)))
 		{
 			WLog_Print(audin->log, WLOG_ERROR, "audin_load_device_plugin %s failed with error %"PRIu32"!",
 			           audin->subsystem, error);
@@ -964,7 +959,7 @@ UINT DVCPluginEntry(IDRDYNVC_ENTRY_POINTS* pEntryPoints)
 				WLog_Print(audin->log, WLOG_ERROR, "audin_set_device_name for %s failed with error %"PRIu32"!",
 				           entry->subsystem, error);
 			}
-			else if ((error = audin_load_device_plugin((IWTSPlugin*) audin, audin->subsystem, args)))
+			else if ((error = audin_load_device_plugin(audin, audin->subsystem, args)))
 			{
 				WLog_Print(audin->log, WLOG_ERROR, "audin_load_device_plugin %s failed with error %"PRIu32"!",
 				           entry->subsystem, error);
