@@ -36,7 +36,6 @@
 #include <winpr/cmdline.h>
 
 #include <freerdp/types.h>
-#include <freerdp/codec/dsp.h>
 #include <freerdp/channels/log.h>
 
 #include "rdpsnd_main.h"
@@ -52,13 +51,11 @@ struct rdpsnd_winmm_plugin
 	int wformat;
 	int block_size;
 	UINT32 volume;
-	FREERDP_DSP_CONTEXT* dsp_context;
+	HANDLE next;
 };
 
 static BOOL rdpsnd_winmm_convert_format(const AUDIO_FORMAT* in, WAVEFORMATEX* out)
 {
-	BOOL result = FALSE;
-
 	ZeroMemory(out, sizeof(WAVEFORMATEX));
 	out->wFormatTag = WAVE_FORMAT_PCM;
 	out->nChannels = in->nChannels;
@@ -68,23 +65,19 @@ static BOOL rdpsnd_winmm_convert_format(const AUDIO_FORMAT* in, WAVEFORMATEX* ou
 	{
 		case WAVE_FORMAT_PCM:
 			out->wBitsPerSample = in->wBitsPerSample;
-			result = TRUE;
 			break;
 
-		case WAVE_FORMAT_ADPCM:
-		case WAVE_FORMAT_DVI_ADPCM:
-			out->wBitsPerSample = 16;
-			result = TRUE;
-			break;
+		default:
+			return FALSE;
 	}
 
 	out->nBlockAlign = out->nChannels * out->wBitsPerSample / 8;
 	out->nAvgBytesPerSec = out->nSamplesPerSec * out->nBlockAlign;
 
-	return result;
+	return TRUE;
 }
 
-static BOOL rdpsnd_winmm_set_format(rdpsndDevicePlugin* device, AUDIO_FORMAT* format, int latency)
+static BOOL rdpsnd_winmm_set_format(rdpsndDevicePlugin* device, const AUDIO_FORMAT* format, int latency)
 {
 	rdpsndWinmmPlugin* winmm = (rdpsndWinmmPlugin*) device;
 
@@ -101,7 +94,6 @@ static BOOL rdpsnd_winmm_set_format(rdpsndDevicePlugin* device, AUDIO_FORMAT* fo
 
 static void CALLBACK rdpsnd_winmm_callback_function(HWAVEOUT hwo, UINT uMsg, DWORD_PTR dwInstance, DWORD_PTR dwParam1, DWORD_PTR dwParam2)
 {
-	RDPSND_WAVE* wave;
 	LPWAVEHDR lpWaveHdr;
 	rdpsndWinmmPlugin* winmm = (rdpsndWinmmPlugin*) dwInstance;
 
@@ -110,42 +102,22 @@ static void CALLBACK rdpsnd_winmm_callback_function(HWAVEOUT hwo, UINT uMsg, DWO
 		case MM_WOM_OPEN:
 			WLog_DBG(TAG,  "MM_WOM_OPEN");
 			break;
-		
+
 		case MM_WOM_CLOSE:
 			WLog_DBG(TAG,  "MM_WOM_CLOSE");
+			SetEvent(winmm->next);
 			break;
 
 		case MM_WOM_DONE:
-			{
-				UINT32 wTimeDelta;
-				lpWaveHdr = (LPWAVEHDR) dwParam1;
-
-				if (!lpWaveHdr)
-					return;
-
-				wave = (RDPSND_WAVE*) lpWaveHdr->dwUser;
-
-				if (!wave)
-					return;
-
-				WLog_DBG(TAG,  "MM_WOM_DONE: dwBufferLength: %"PRIu32" cBlockNo: %"PRIu8"",
-						 lpWaveHdr->dwBufferLength, wave->cBlockNo);
-				wave->wLocalTimeB = GetTickCount();
-				wTimeDelta = wave->wLocalTimeB - wave->wLocalTimeA;
-				wave->wTimeStampB = wave->wTimeStampA + wTimeDelta;
-
-				winmm->device.WaveConfirm(&(winmm->device), wave);
-
-				free(lpWaveHdr->lpData);
-				free(lpWaveHdr);
-
-				free(wave);
-			}
+			WLog_DBG(TAG, "MM_WOM_DONE");
+			lpWaveHdr = (LPWAVEHDR) dwParam1;
+			free(lpWaveHdr);
+			SetEvent(winmm->next);
 			break;
 	}
 }
 
-static BOOL rdpsnd_winmm_open(rdpsndDevicePlugin* device, AUDIO_FORMAT* format, int latency)
+static BOOL rdpsnd_winmm_open(rdpsndDevicePlugin* device, const AUDIO_FORMAT* format, int latency)
 {
 	MMRESULT mmResult;
 	rdpsndWinmmPlugin* winmm = (rdpsndWinmmPlugin*) device;
@@ -154,10 +126,9 @@ static BOOL rdpsnd_winmm_open(rdpsndDevicePlugin* device, AUDIO_FORMAT* format, 
 		return TRUE;
 
 	rdpsnd_winmm_set_format(device, format, latency);
-	freerdp_dsp_context_reset_adpcm(winmm->dsp_context);
 
 	mmResult = waveOutOpen(&winmm->hWaveOut, WAVE_MAPPER, &winmm->format,
-			(DWORD_PTR) rdpsnd_winmm_callback_function, (DWORD_PTR) winmm, CALLBACK_FUNCTION);
+	        (DWORD_PTR) rdpsnd_winmm_callback_function, (DWORD_PTR) winmm, CALLBACK_FUNCTION);
 
 	if (mmResult != MMSYSERR_NOERROR)
 	{
@@ -191,7 +162,7 @@ static void rdpsnd_winmm_close(rdpsndDevicePlugin* device)
 		{
 			WLog_ERR(TAG,  "waveOutClose failure: %"PRIu32"", mmResult);
 		}
-		
+
 		winmm->hWaveOut = NULL;
 	}
 }
@@ -203,14 +174,12 @@ static void rdpsnd_winmm_free(rdpsndDevicePlugin* device)
 	if (winmm)
 	{
 		rdpsnd_winmm_close(device);
-
-		freerdp_dsp_context_free(winmm->dsp_context);
-
+		CloseHandle(winmm->next);
 		free(winmm);
 	}
 }
 
-static BOOL rdpsnd_winmm_format_supported(rdpsndDevicePlugin* device, AUDIO_FORMAT* format)
+static BOOL rdpsnd_winmm_format_supported(rdpsndDevicePlugin* device, const AUDIO_FORMAT* format)
 {
 	MMRESULT result;
 	WAVEFORMATEX out;
@@ -258,42 +227,12 @@ static BOOL rdpsnd_winmm_set_volume(rdpsndDevicePlugin* device, UINT32 value)
 	return (waveOutSetVolume(winmm->hWaveOut, value) == MMSYSERR_NOERROR);
 }
 
-static BOOL rdpsnd_winmm_wave_decode(rdpsndDevicePlugin* device, RDPSND_WAVE* wave)
+static void rdpsnd_winmm_start(rdpsndDevicePlugin* device)
 {
-	int length;
-	BYTE* data;
-	rdpsndWinmmPlugin* winmm = (rdpsndWinmmPlugin*) device;
-
-	if (winmm->wformat == WAVE_FORMAT_ADPCM)
-	{
-		winmm->dsp_context->decode_ms_adpcm(winmm->dsp_context,
-			wave->data, wave->length, winmm->format.nChannels, winmm->block_size);
-		length = winmm->dsp_context->adpcm_size;
-		data = winmm->dsp_context->adpcm_buffer;
-	}
-	else if (winmm->wformat == WAVE_FORMAT_DVI_ADPCM)
-	{
-		winmm->dsp_context->decode_ima_adpcm(winmm->dsp_context,
-			wave->data, wave->length, winmm->format.nChannels, winmm->block_size);
-		length = winmm->dsp_context->adpcm_size;
-		data = winmm->dsp_context->adpcm_buffer;
-	}
-	else
-	{
-		length = wave->length;
-		data = wave->data;
-	}
-
-	wave->data = (BYTE*) malloc(length);
-	if (!wave->data)
-		return FALSE;
-	CopyMemory(wave->data, data, length);
-	wave->length = length;
-
-	return TRUE;
+	//rdpsndWinmmPlugin* winmm = (rdpsndWinmmPlugin*) device;
 }
 
-void rdpsnd_winmm_wave_play(rdpsndDevicePlugin* device, RDPSND_WAVE* wave)
+static void rdpsnd_winmm_play(rdpsndDevicePlugin* device, const BYTE* data, size_t size)
 {
 	MMRESULT mmResult;
 	LPWAVEHDR lpWaveHdr;
@@ -301,8 +240,6 @@ void rdpsnd_winmm_wave_play(rdpsndDevicePlugin* device, RDPSND_WAVE* wave)
 
 	if (!winmm->hWaveOut)
 		return;
-
-	wave->AutoConfirm = FALSE;
 
 	lpWaveHdr = (LPWAVEHDR) malloc(sizeof(WAVEHDR));
 
@@ -313,9 +250,9 @@ void rdpsnd_winmm_wave_play(rdpsndDevicePlugin* device, RDPSND_WAVE* wave)
 
 	lpWaveHdr->dwFlags = 0;
 	lpWaveHdr->dwLoops = 0;
-	lpWaveHdr->lpData = (LPSTR) wave->data;
-	lpWaveHdr->dwBufferLength = wave->length;
-	lpWaveHdr->dwUser = (DWORD_PTR) wave;
+	lpWaveHdr->lpData = (LPSTR) data;
+	lpWaveHdr->dwBufferLength = size;
+	lpWaveHdr->dwUser = NULL;
 	lpWaveHdr->lpNext = NULL;
 
 	mmResult = waveOutPrepareHeader(winmm->hWaveOut, lpWaveHdr, sizeof(WAVEHDR));
@@ -335,11 +272,8 @@ void rdpsnd_winmm_wave_play(rdpsndDevicePlugin* device, RDPSND_WAVE* wave)
 		free(lpWaveHdr);
 		return;
 	}
-}
 
-static void rdpsnd_winmm_start(rdpsndDevicePlugin* device)
-{
-	//rdpsndWinmmPlugin* winmm = (rdpsndWinmmPlugin*) device;
+	WaitForSingleObject(winmm->next, INFINITE);
 }
 
 static void rdpsnd_winmm_parse_addin_args(rdpsndDevicePlugin* device, ADDIN_ARGV* args)
@@ -368,28 +302,25 @@ UINT freerdp_rdpsnd_client_subsystem_entry(PFREERDP_RDPSND_DEVICE_ENTRY_POINTS p
 	if (!winmm)
 		return CHANNEL_RC_NO_MEMORY;
 
-	winmm->device.DisableConfirmThread = TRUE;
-
 	winmm->device.Open = rdpsnd_winmm_open;
 	winmm->device.FormatSupported = rdpsnd_winmm_format_supported;
 	winmm->device.SetFormat = rdpsnd_winmm_set_format;
 	winmm->device.GetVolume = rdpsnd_winmm_get_volume;
 	winmm->device.SetVolume = rdpsnd_winmm_set_volume;
-	winmm->device.WaveDecode = rdpsnd_winmm_wave_decode;
-	winmm->device.WavePlay = rdpsnd_winmm_wave_play;
 	winmm->device.Start = rdpsnd_winmm_start;
+	winmm->device.Play = rdpsnd_winmm_play;
 	winmm->device.Close = rdpsnd_winmm_close;
 	winmm->device.Free = rdpsnd_winmm_free;
 
-	args = pEntryPoints->args;
-	rdpsnd_winmm_parse_addin_args((rdpsndDevicePlugin*) winmm, args);
-
-	winmm->dsp_context = freerdp_dsp_context_new();
-	if (!winmm->dsp_context)
+	winmm->next = CreateEventA(NULL, FALSE, FALSE, "winmm-play-event");
+	if (!winmm->next)
 	{
 		free(winmm);
 		return CHANNEL_RC_NO_MEMORY;
 	}
+
+	args = pEntryPoints->args;
+	rdpsnd_winmm_parse_addin_args((rdpsndDevicePlugin*) winmm, args);
 
 	winmm->volume = 0xFFFFFFFF;
 
