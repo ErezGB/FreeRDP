@@ -197,7 +197,7 @@ static BOOL rdpsnd_pulse_set_format_spec(rdpsndPulsePlugin* pulse, const AUDIO_F
 	if (!pulse->context)
 		return FALSE;
 
-	if (!rdpsnd_pulse_format_supported(pulse, format))
+	if (!rdpsnd_pulse_format_supported(&pulse->device, format))
 		return FALSE;
 
 	sample_spec.rate = format->nSamplesPerSec;

@@ -28,7 +28,7 @@
 
 #define TAG FREERDP_TAG("codec")
 
-UINT32 rdpsnd_compute_audio_time_length(AUDIO_FORMAT* format, size_t size)
+UINT32 rdpsnd_compute_audio_time_length(const AUDIO_FORMAT* format, size_t size)
 {
 	UINT32 mstime;
 	UINT32 wSamples;
@@ -112,7 +112,7 @@ char* rdpsnd_get_audio_tag_string(UINT16 wFormatTag)
 	return "WAVE_FORMAT_UNKNOWN";
 }
 
-void rdpsnd_print_audio_format(AUDIO_FORMAT* format)
+void rdpsnd_print_audio_format(const AUDIO_FORMAT* format)
 {
 	WLog_INFO(TAG,  "%s:\t wFormatTag: 0x%04"PRIX16" nChannels: %"PRIu16" nSamplesPerSec: %"PRIu32" "
 	          "nAvgBytesPerSec: %"PRIu32" nBlockAlign: %"PRIu16" wBitsPerSample: %"PRIu16" cbSize: %"PRIu16"",
@@ -121,16 +121,16 @@ void rdpsnd_print_audio_format(AUDIO_FORMAT* format)
 	          format->nBlockAlign, format->wBitsPerSample, format->cbSize);
 }
 
-void rdpsnd_print_audio_formats(AUDIO_FORMAT* formats, UINT16 count)
+void rdpsnd_print_audio_formats(const AUDIO_FORMAT* formats, UINT16 count)
 {
-	int index;
-	AUDIO_FORMAT* format;
+	UINT16 index;
+	const AUDIO_FORMAT* format;
 
 	if (formats)
 	{
 		WLog_INFO(TAG,  "AUDIO_FORMATS (%"PRIu16") ={", count);
 
-		for (index = 0; index < (int) count; index++)
+		for (index = 0; index < count; index++)
 		{
 			format = &formats[index];
 			WLog_ERR(TAG,  "\t");
