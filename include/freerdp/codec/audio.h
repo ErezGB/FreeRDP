@@ -188,10 +188,10 @@ typedef struct AUDIO_FORMAT AUDIO_FORMAT;
  */
 
 #ifdef __cplusplus
- extern "C" {
+extern "C" {
 #endif
 
-FREERDP_API UINT32 rdpsnd_compute_audio_time_length(AUDIO_FORMAT* format, int size);
+FREERDP_API UINT32 rdpsnd_compute_audio_time_length(AUDIO_FORMAT* format, size_t size);
 
 FREERDP_API char* rdpsnd_get_audio_tag_string(UINT16 wFormatTag);
 
@@ -201,7 +201,7 @@ FREERDP_API void rdpsnd_print_audio_formats(AUDIO_FORMAT* formats, UINT16 count)
 FREERDP_API void rdpsnd_free_audio_formats(AUDIO_FORMAT* formats, UINT16 count);
 
 #ifdef __cplusplus
- }
+}
 #endif
 
 #endif /* FREERDP_CODEC_AUDIO_H */
