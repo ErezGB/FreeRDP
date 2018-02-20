@@ -37,6 +37,12 @@
 
 #include <winpr/stream.h>
 #include <freerdp/freerdp.h>
+#include <freerdp/codec/dsp.h>
+
+#ifdef WITH_GSM
+#include <gsm/gsm.h>
+#endif
+
 #include "audin_main.h"
 
 #define MSG_SNDIN_VERSION       0x01
@@ -70,8 +76,8 @@ struct _AUDIN_CHANNEL_CALLBACK
 	 * be stored as reference when the server sends the format index in
 	 * Open PDU and Format Change PDU
 	 */
-	audinFormat* formats;
-	int formats_count;
+	AUDIO_FORMAT* formats;
+	UINT32 formats_count;
 };
 
 typedef struct _AUDIN_PLUGIN AUDIN_PLUGIN;
@@ -93,9 +99,61 @@ struct _AUDIN_PLUGIN
 
 	rdpContext* rdpcontext;
 	BOOL attached;
+	wStream* data;
+	wStream* buffer;
+	AUDIO_FORMAT* format;
+	UINT32 FramesPerPacket;
+
+	FREERDP_DSP_CONTEXT* dsp_context;
+#ifdef WITH_GSM
+	gsm gsm_context;
+#endif
 };
 
 static BOOL audin_process_addin_args(AUDIN_PLUGIN* audin, ADDIN_ARGV* args);
+
+static UINT audin_channel_write_and_free(AUDIN_CHANNEL_CALLBACK* callback, wStream* out,
+        BOOL freeStream)
+{
+	UINT error;
+
+	if (!callback || !out)
+		return ERROR_INVALID_PARAMETER;
+
+	if (!callback->channel || !callback->channel->Write)
+		return ERROR_INTERNAL_ERROR;
+
+	Stream_SealLength(out);
+	error = callback->channel->Write(callback->channel,
+	                                 Stream_GetPosition(out),
+	                                 Stream_Buffer(out), NULL);
+
+	if (freeStream)
+		Stream_Free(out, TRUE);
+
+	return error;
+}
+
+static BOOL audin_generic_format_supported(const AUDIO_FORMAT* format)
+{
+	switch (format->wFormatTag)
+	{
+#if defined(WITH_GSM)
+
+		case WAVE_FORMAT_GSM610:
+#endif
+#if 0 // defined(WITH_FFMPEG)
+		case WAVE_FORMAT_AAC_MS:
+		case WAVE_FORMAT_MPEGLAYER3:
+#endif
+		case WAVE_FORMAT_ADPCM:
+		case WAVE_FORMAT_DVI_ADPCM:
+			return TRUE;
+
+		default:
+			return FALSE;
+	}
+}
 
 /**
  * Function description
@@ -104,7 +162,6 @@ static BOOL audin_process_addin_args(AUDIN_PLUGIN* audin, ADDIN_ARGV* args);
  */
 static UINT audin_process_version(IWTSVirtualChannelCallback* pChannelCallback, wStream* s)
 {
-	UINT error;
 	wStream* out;
 	UINT32 Version;
 	AUDIN_CHANNEL_CALLBACK* callback = (AUDIN_CHANNEL_CALLBACK*) pChannelCallback;
@@ -120,10 +177,7 @@ static UINT audin_process_version(IWTSVirtualChannelCallback* pChannelCallback, 
 
 	Stream_Write_UINT8(out, MSG_SNDIN_VERSION);
 	Stream_Write_UINT32(out, Version);
-	error = callback->channel->Write(callback->channel, (UINT32) Stream_GetPosition(out),
-	                                 Stream_Buffer(out), NULL);
-	Stream_Free(out, TRUE);
-	return error;
+	return audin_channel_write_and_free(callback, out, TRUE);
 }
 
 /**
@@ -149,11 +203,10 @@ static UINT audin_process_formats(IWTSVirtualChannelCallback* pChannelCallback, 
 	AUDIN_CHANNEL_CALLBACK* callback = (AUDIN_CHANNEL_CALLBACK*) pChannelCallback;
 	AUDIN_PLUGIN* audin = (AUDIN_PLUGIN*) callback->plugin;
 	UINT32 i;
-	BYTE* fm;
 	UINT error;
 	wStream* out;
 	UINT32 NumFormats;
-	audinFormat format;
+	AUDIO_FORMAT format;
 	UINT32 cbSizeFormatsPacket;
 	Stream_Read_UINT32(s, NumFormats);
 	DEBUG_DVC("NumFormats %"PRIu32"", NumFormats);
@@ -165,7 +218,7 @@ static UINT audin_process_formats(IWTSVirtualChannelCallback* pChannelCallback, 
 	}
 
 	Stream_Seek_UINT32(s); /* cbSizeFormatsPacket */
-	callback->formats = (audinFormat*) calloc(NumFormats, sizeof(audinFormat));
+	callback->formats = (AUDIO_FORMAT*) calloc(NumFormats, sizeof(AUDIO_FORMAT));
 
 	if (!callback->formats)
 	{
@@ -187,6 +240,7 @@ static UINT audin_process_formats(IWTSVirtualChannelCallback* pChannelCallback, 
 	/* SoundFormats (variable) */
 	for (i = 0; i < NumFormats; i++)
 	{
+		BYTE* fm;
 		Stream_GetPointer(s, fm);
 		Stream_Read_UINT16(s, format.wFormatTag);
 		Stream_Read_UINT16(s, format.nChannels);
@@ -211,7 +265,8 @@ static UINT audin_process_formats(IWTSVirtualChannelCallback* pChannelCallback, 
 		if (audin->fixed_rate > 0 && audin->fixed_rate != format.nSamplesPerSec)
 			continue;
 
-		if (audin->device && audin->device->FormatSupported(audin->device, &format))
+		if (audin_generic_format_supported(&format) ||
+		    audin->device->FormatSupported(audin->device, &format))
 		{
 			DEBUG_DVC("format ok");
 			/* Store the agreed format in the corresponding index */
@@ -240,7 +295,8 @@ static UINT audin_process_formats(IWTSVirtualChannelCallback* pChannelCallback, 
 	Stream_Write_UINT8(out, MSG_SNDIN_FORMATS); /* Header (1 byte) */
 	Stream_Write_UINT32(out, callback->formats_count); /* NumFormats (4 bytes) */
 	Stream_Write_UINT32(out, cbSizeFormatsPacket); /* cbSizeFormatsPacket (4 bytes) */
-	error = callback->channel->Write(callback->channel, cbSizeFormatsPacket, Stream_Buffer(out), NULL);
+	Stream_SetPosition(out, cbSizeFormatsPacket);
+	error = audin_channel_write_and_free(callback, out, TRUE);
 out:
 
 	if (error != CHANNEL_RC_OK)
@@ -249,7 +305,6 @@ out:
 		callback->formats = NULL;
 	}
 
-	Stream_Free(out, TRUE);
 	return error;
 }
 
@@ -261,7 +316,6 @@ out:
 static UINT audin_send_format_change_pdu(IWTSVirtualChannelCallback* pChannelCallback,
         UINT32 NewFormat)
 {
-	UINT error;
 	wStream* out;
 	AUDIN_CHANNEL_CALLBACK* callback = (AUDIN_CHANNEL_CALLBACK*) pChannelCallback;
 	out = Stream_New(NULL, 5);
@@ -274,9 +328,7 @@ static UINT audin_send_format_change_pdu(IWTSVirtualChannelCallback* pChannelCal
 
 	Stream_Write_UINT8(out, MSG_SNDIN_FORMATCHANGE);
 	Stream_Write_UINT32(out, NewFormat);
-	error = callback->channel->Write(callback->channel, 5, Stream_Buffer(out), NULL);
-	Stream_Free(out, TRUE);
-	return error;
+	return audin_channel_write_and_free(callback, out, TRUE);
 }
 
 /**
@@ -286,7 +338,6 @@ static UINT audin_send_format_change_pdu(IWTSVirtualChannelCallback* pChannelCal
  */
 static UINT audin_send_open_reply_pdu(IWTSVirtualChannelCallback* pChannelCallback, UINT32 Result)
 {
-	UINT error;
 	wStream* out;
 	AUDIN_CHANNEL_CALLBACK* callback = (AUDIN_CHANNEL_CALLBACK*) pChannelCallback;
 	out = Stream_New(NULL, 5);
@@ -299,9 +350,24 @@ static UINT audin_send_open_reply_pdu(IWTSVirtualChannelCallback* pChannelCallba
 
 	Stream_Write_UINT8(out, MSG_SNDIN_OPEN_REPLY);
 	Stream_Write_UINT32(out, Result);
-	error = callback->channel->Write(callback->channel, 5, Stream_Buffer(out), NULL);
-	Stream_Free(out, TRUE);
-	return error;
+	return audin_channel_write_and_free(callback, out, TRUE);
+}
+
+static BOOL formats_equal(const AUDIO_FORMAT* a, const AUDIO_FORMAT* b)
+{
+	if (a->wFormatTag != b->wFormatTag)
+		return FALSE;
+
+	if (a->nChannels != b->nChannels)
+		return FALSE;
+
+	if (a->wBitsPerSample != b->wBitsPerSample)
+		return FALSE;
+
+	if (a->nSamplesPerSec != b->nSamplesPerSec)
+		return FALSE;
+
+	return TRUE;
 }
 
 /**
@@ -309,11 +375,13 @@ static UINT audin_send_open_reply_pdu(IWTSVirtualChannelCallback* pChannelCallba
  *
  * @return 0 on success, otherwise a Win32 error code
  */
-static UINT audin_receive_wave_data(const BYTE* data, int size, void* user_data)
+static UINT audin_receive_wave_data(const AUDIO_FORMAT* format, UINT32 nrFrames,
+                                    const BYTE* data, size_t size, void* user_data)
 {
 	UINT error;
-	wStream* out;
 	AUDIN_PLUGIN* audin;
+	const BYTE* encoded_data;
+	size_t encoded_size;
 	AUDIN_CHANNEL_CALLBACK* callback = (AUDIN_CHANNEL_CALLBACK*) user_data;
 
 	if (!callback)
@@ -327,28 +395,147 @@ static UINT audin_receive_wave_data(const BYTE* data, int size, void* user_data)
 	if (!audin->attached)
 		return CHANNEL_RC_OK;
 
+	if (formats_equal(format, audin->format))
+	{
+		encoded_data = data;
+		encoded_size = size;
+	}
+	else if (format->wFormatTag != WAVE_FORMAT_PCM)
+		return ERROR_INTERNAL_ERROR;
+	else
+	{
+		if (!audin->dsp_context->resample(audin->dsp_context, data, format->wBitsPerSample / 8,
+		                                  format->nChannels, format->nSamplesPerSec, nrFrames,
+		                                  audin->format->nChannels, audin->format->nSamplesPerSec))
+			return ERROR_INTERNAL_ERROR;
+
+		switch (audin->format->wFormatTag)
+		{
+			case WAVE_FORMAT_PCM:
+				encoded_data = audin->dsp_context->resampled_buffer;
+				encoded_size = audin->dsp_context->resampled_size;
+				break;
+
+			case WAVE_FORMAT_ADPCM:
+				if (!audin->dsp_context->encode_ms_adpcm(audin->dsp_context,
+				        audin->dsp_context->resampled_buffer,
+				        audin->dsp_context->resampled_size,
+				        audin->format->nChannels,
+				        audin->format->nBlockAlign))
+				{
+					return ERROR_INTERNAL_ERROR;
+				}
+
+				encoded_data = audin->dsp_context->adpcm_buffer;
+				encoded_size = audin->dsp_context->adpcm_size;
+				break;
+
+			case WAVE_FORMAT_DVI_ADPCM:
+				if (!audin->dsp_context->encode_ima_adpcm(audin->dsp_context,
+				        audin->dsp_context->resampled_buffer,
+				        audin->dsp_context->resampled_size,
+				        audin->format->nChannels,
+				        audin->format->nBlockAlign))
+				{
+					return ERROR_INTERNAL_ERROR;
+				}
+
+				encoded_data = audin->dsp_context->adpcm_buffer;
+				encoded_size = audin->dsp_context->adpcm_size;
+				break;
+#if defined(WITH_GSM)
+
+			case WAVE_FORMAT_GSM610:
+				{
+					BYTE* src = audin->dsp_context->resampled_buffer;
+					INT64 remaining = audin->dsp_context->resampled_size;
+					Stream_SetPosition(audin->buffer, 0);
+
+					while (remaining > 0)
+					{
+						const size_t dstStep = 160 * sizeof(gsm_byte);
+						const size_t srcStep = 160 * sizeof(gsm_signal);
+						gsm_byte* dst;
+
+						if (!Stream_EnsureRemainingCapacity(audin->buffer, dstStep))
+							return ERROR_OUTOFMEMORY;
+
+						dst = Stream_Pointer(audin->buffer);
+						gsm_encode(audin->gsm_context, (gsm_signal*)src, dst);
+						Stream_Seek(audin->buffer, dstStep);
+						remaining -= srcStep;
+						src += srcStep;
+					}
+
+					encoded_data = Stream_Buffer(audin->buffer);
+					encoded_size = Stream_GetPosition(audin->buffer);
+				}
+				break;
+#endif
+
+			default:
+				return ERROR_INTERNAL_ERROR;
+		}
+	}
+
 	if ((error = audin_send_incoming_data_pdu((IWTSVirtualChannelCallback*) callback)))
 	{
 		WLog_ERR(TAG, "audin_send_incoming_data_pdu failed!");
 		return error;
 	}
 
-	out = Stream_New(NULL, size + 1);
+	Stream_SetPosition(audin->data, 0);
 
-	if (!out)
-	{
-		WLog_ERR(TAG, "Stream_New failed!");
-		return ERROR_NOT_ENOUGH_MEMORY;
-	}
+	if (!Stream_EnsureRemainingCapacity(audin->data, encoded_size + 1))
+		return CHANNEL_RC_NO_MEMORY;
 
-	Stream_Write_UINT8(out, MSG_SNDIN_DATA);
-	Stream_Write(out, data, size);
-	error = callback->channel->Write(callback->channel, (UINT32) Stream_GetPosition(out),
-	                                 Stream_Buffer(out), NULL);
-	Stream_Free(out, TRUE);
-	return error;
+	Stream_Write_UINT8(audin->data, MSG_SNDIN_DATA);
+	Stream_Write(audin->data, encoded_data, encoded_size);
+	return audin_channel_write_and_free(callback, audin->data, FALSE);
 }
 
+static BOOL audin_open_device(AUDIN_PLUGIN* audin, AUDIN_CHANNEL_CALLBACK* callback)
+{
+	UINT error;
+	BOOL supported;
+	AUDIO_FORMAT format;
+
+	if (!audin || !audin->device)
+		return FALSE;
+
+	format = *audin->format;
+	supported = IFCALLRESULT(FALSE, audin->device->FormatSupported, audin->device, &format);
+
+	if (!supported)
+	{
+		format.wFormatTag = WAVE_FORMAT_PCM;
+		format.wBitsPerSample = 16;
+	}
+
+	WLog_DBG(TAG, "microphone uses %s codec",
+	         rdpsnd_get_audio_tag_string(format.wFormatTag));
+	IFCALLRET(audin->device->SetFormat, error,
+	          audin->device, &format,
+	          audin->FramesPerPacket);
+
+	if (error != CHANNEL_RC_OK)
+	{
+		WLog_ERR(TAG, "SetFormat failed with errorcode %"PRIu32"", error);
+		return FALSE;
+	}
+
+	IFCALLRET(audin->device->Open, error, audin->device,
+	          audin_receive_wave_data, callback);
+
+	if (error != CHANNEL_RC_OK)
+	{
+		WLog_ERR(TAG, "Open failed with errorcode %"PRIu32"", error);
+		return FALSE;
+	}
+
+	freerdp_dsp_context_reset_adpcm(audin->dsp_context);
+	return TRUE;
+}
 /**
  * Function description
  *
@@ -358,7 +545,6 @@ static UINT audin_process_open(IWTSVirtualChannelCallback* pChannelCallback, wSt
 {
 	AUDIN_CHANNEL_CALLBACK* callback = (AUDIN_CHANNEL_CALLBACK*) pChannelCallback;
 	AUDIN_PLUGIN* audin = (AUDIN_PLUGIN*) callback->plugin;
-	audinFormat* format;
 	UINT32 initialFormat;
 	UINT32 FramesPerPacket;
 	UINT error = CHANNEL_RC_OK;
@@ -366,6 +552,7 @@ static UINT audin_process_open(IWTSVirtualChannelCallback* pChannelCallback, wSt
 	Stream_Read_UINT32(s, initialFormat);
 	DEBUG_DVC("FramesPerPacket=%"PRIu32" initialFormat=%"PRIu32"",
 	          FramesPerPacket, initialFormat);
+	audin->FramesPerPacket = FramesPerPacket;
 
 	if (initialFormat >= (UINT32) callback->formats_count)
 	{
@@ -374,26 +561,10 @@ static UINT audin_process_open(IWTSVirtualChannelCallback* pChannelCallback, wSt
 		return ERROR_INVALID_DATA;
 	}
 
-	format = &callback->formats[initialFormat];
+	audin->format = &callback->formats[initialFormat];
 
-	if (audin->device)
-	{
-		IFCALLRET(audin->device->SetFormat, error, audin->device, format, FramesPerPacket);
-
-		if (error != CHANNEL_RC_OK)
-		{
-			WLog_ERR(TAG, "SetFormat failed with errorcode %"PRIu32"", error);
-			return error;
-		}
-
-		IFCALLRET(audin->device->Open, error, audin->device, audin_receive_wave_data, callback);
-
-		if (error != CHANNEL_RC_OK)
-		{
-			WLog_ERR(TAG, "Open failed with errorcode %"PRIu32"", error);
-			return error;
-		}
-	}
+	if (!audin_open_device(audin, callback))
+		return ERROR_INTERNAL_ERROR;
 
 	if ((error = audin_send_format_change_pdu(pChannelCallback, initialFormat)))
 	{
@@ -417,7 +588,6 @@ static UINT audin_process_format_change(IWTSVirtualChannelCallback* pChannelCall
 	AUDIN_CHANNEL_CALLBACK* callback = (AUDIN_CHANNEL_CALLBACK*) pChannelCallback;
 	AUDIN_PLUGIN* audin = (AUDIN_PLUGIN*) callback->plugin;
 	UINT32 NewFormat;
-	audinFormat* format;
 	UINT error = CHANNEL_RC_OK;
 	Stream_Read_UINT32(s, NewFormat);
 	DEBUG_DVC("NewFormat=%"PRIu32"", NewFormat);
@@ -429,7 +599,7 @@ static UINT audin_process_format_change(IWTSVirtualChannelCallback* pChannelCall
 		return ERROR_INVALID_DATA;
 	}
 
-	format = &callback->formats[NewFormat];
+	audin->format = &callback->formats[NewFormat];
 
 	if (audin->device)
 	{
@@ -440,23 +610,10 @@ static UINT audin_process_format_change(IWTSVirtualChannelCallback* pChannelCall
 			WLog_ERR(TAG, "Close failed with errorcode %"PRIu32"", error);
 			return error;
 		}
-
-		IFCALLRET(audin->device->SetFormat, error, audin->device, format, 0);
-
-		if (error != CHANNEL_RC_OK)
-		{
-			WLog_ERR(TAG, "SetFormat failed with errorcode %"PRIu32"", error);
-			return error;
-		}
-
-		IFCALLRET(audin->device->Open, error, audin->device, audin_receive_wave_data, callback);
-
-		if (error != CHANNEL_RC_OK)
-		{
-			WLog_ERR(TAG, "Open failed with errorcode %"PRIu32"", error);
-			return error;
-		}
 	}
+
+	if (!audin_open_device(audin, callback))
+		return ERROR_INTERNAL_ERROR;
 
 	if ((error = audin_send_format_change_pdu(pChannelCallback, NewFormat)))
 		WLog_ERR(TAG, "audin_send_format_change_pdu failed!");
@@ -523,6 +680,7 @@ static UINT audin_on_close(IWTSVirtualChannelCallback* pChannelCallback)
 			WLog_ERR(TAG, "Close failed with errorcode %"PRIu32"", error);
 	}
 
+	audin->format = NULL;
 	free(callback->formats);
 	free(callback);
 	return error;
@@ -605,10 +763,17 @@ static UINT audin_plugin_terminated(IWTSPlugin* pPlugin)
 		audin->device = NULL;
 	}
 
+	freerdp_dsp_context_free(audin->dsp_context);
+#if defined(WITH_GSM)
+
+	if (audin->gsm_context)
+		gsm_destroy(audin->gsm_context);
+
+#endif
+	Stream_Free(audin->data, TRUE);
+	Stream_Free(audin->buffer, TRUE);
 	free(audin->subsystem);
-	audin->subsystem = NULL;
 	free(audin->device_name);
-	audin->device_name = NULL;
 	free(audin->listener_callback);
 	free(audin);
 	return CHANNEL_RC_OK;
@@ -667,12 +832,7 @@ static UINT audin_load_device_plugin(IWTSPlugin* pPlugin, const char* name, ADDI
 {
 	PFREERDP_AUDIN_DEVICE_ENTRY entry;
 	FREERDP_AUDIN_DEVICE_ENTRY_POINTS entryPoints;
-	AUDIN_PLUGIN* audin = (AUDIN_PLUGIN*)pPlugin;
 	UINT error;
-
-	if (!audin_process_addin_args(audin, args))
-		return CHANNEL_RC_INITIALIZATION_ERROR;
-
 	entry = (PFREERDP_AUDIN_DEVICE_ENTRY) freerdp_load_channel_addin_entry("audin", (LPSTR) name, NULL,
 	        0);
 
@@ -703,7 +863,7 @@ static UINT audin_load_device_plugin(IWTSPlugin* pPlugin, const char* name, ADDI
  *
  * @return 0 on success, otherwise a Win32 error code
  */
-static UINT audin_set_subsystem(AUDIN_PLUGIN* audin, char* subsystem)
+static UINT audin_set_subsystem(AUDIN_PLUGIN* audin, const char* subsystem)
 {
 	free(audin->subsystem);
 	audin->subsystem = _strdup(subsystem);
@@ -882,6 +1042,28 @@ UINT DVCPluginEntry(IDRDYNVC_ENTRY_POINTS* pEntryPoints)
 		return CHANNEL_RC_NO_MEMORY;
 	}
 
+	audin->data = Stream_New(NULL, 4096);
+
+	if (!audin->data)
+		goto out;
+
+	audin->buffer = Stream_New(NULL, 4096);
+
+	if (!audin->buffer)
+		goto out;
+
+	audin->dsp_context = freerdp_dsp_context_new();
+
+	if (!audin->dsp_context)
+		goto out;
+
+#if defined(WITH_GSM)
+	audin->gsm_context = gsm_create();
+
+	if (!audin->gsm_context)
+		goto out;
+
+#endif
 	audin->attached = TRUE;
 	audin->iface.Initialize = audin_plugin_initialize;
 	audin->iface.Connected = NULL;
