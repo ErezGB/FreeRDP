@@ -56,7 +56,7 @@ typedef struct _AudinWinmmDevice
 } AudinWinmmDevice;
 
 static void CALLBACK waveInProc(HWAVEIN hWaveIn, UINT uMsg, DWORD_PTR dwInstance,
-						DWORD_PTR dwParam1, DWORD_PTR dwParam2)
+								DWORD_PTR dwParam1, DWORD_PTR dwParam2)
 {
 	AudinWinmmDevice* winmm = (AudinWinmmDevice*) dwInstance;
 	PWAVEHDR pWaveHdr;
@@ -65,36 +65,46 @@ static void CALLBACK waveInProc(HWAVEIN hWaveIn, UINT uMsg, DWORD_PTR dwInstance
 
 	switch(uMsg)
 	{
-		case WIM_CLOSE:
-			break;
+	case WIM_CLOSE:
+		break;
 
-		case WIM_DATA:
-			pWaveHdr = (WAVEHDR *)dwParam1;
-			if (WHDR_DONE == (WHDR_DONE & pWaveHdr->dwFlags))
-			{
-				if (pWaveHdr->dwBytesRecorded
+	case WIM_DATA:
+		pWaveHdr = (WAVEHDR *)dwParam1;
+		if (WHDR_DONE == (WHDR_DONE & pWaveHdr->dwFlags))
+		{
+			if (pWaveHdr->dwBytesRecorded
 					&& !(WaitForSingleObject(winmm->stopEvent, 0) == WAIT_OBJECT_0))
-				{
-					if ((error = winmm->receive(pWaveHdr->lpData, pWaveHdr->dwBytesRecorded, winmm->user_data)))
-						break;
-					mmResult = waveInAddBuffer(hWaveIn, pWaveHdr, sizeof(WAVEHDR));
-					if (mmResult != MMSYSERR_NOERROR)
-						error = ERROR_INTERNAL_ERROR;
-				}
+			{
+				AUDIO_FORMAT format;
+				format.cbSize = winmm->pwfx_cur->cbSize;
+				format.nBlockAlign = winmm->pwfx_cur->nBlockAlign;
+				format.nAvgBytesPerSec = winmm->pwfx_cur->nAvgBytesPerSec;
+				format.nChannels = winmm->pwfx_cur->nChannels;
+				format.nSamplesPerSec = winmm->pwfx_cur->nSamplesPerSec;
+				format.wBitsPerSample = winmm->pwfx_cur->wBitsPerSample;
+				format.wFormatTag = winmm->pwfx_cur->wFormatTag;
+
+				if ((error = winmm->receive(&format, winmm->frames_per_packet,
+											pWaveHdr->lpData, pWaveHdr->dwBytesRecorded, winmm->user_data)))
+					break;
+				mmResult = waveInAddBuffer(hWaveIn, pWaveHdr, sizeof(WAVEHDR));
+				if (mmResult != MMSYSERR_NOERROR)
+					error = ERROR_INTERNAL_ERROR;
 			}
-			break;
+		}
+		break;
 
-		case WIM_OPEN:
-			break;
+	case WIM_OPEN:
+		break;
 
-		default:
-			break;
+	default:
+		break;
 	}
 	if (error && winmm->rdpcontext)
 		setChannelError(winmm->rdpcontext, error, "waveInProc reported an error");
 }
 
-static DWORD audin_winmm_thread_func(void* arg)
+static DWORD WINAPI audin_winmm_thread_func(LPVOID arg)
 {
 	AudinWinmmDevice* winmm = (AudinWinmmDevice*) arg;
 	char *buffer;
@@ -106,7 +116,7 @@ static DWORD audin_winmm_thread_func(void* arg)
 	if (!winmm->hWaveIn)
 	{
 		if (MMSYSERR_NOERROR != waveInOpen(&winmm->hWaveIn, WAVE_MAPPER, winmm->pwfx_cur,
-			(DWORD_PTR)waveInProc, (DWORD_PTR)winmm, CALLBACK_FUNCTION))
+										   (DWORD_PTR)waveInProc, (DWORD_PTR)winmm, CALLBACK_FUNCTION))
 		{
 			if (winmm->rdpcontext)
 				setChannelError(winmm->rdpcontext, ERROR_INTERNAL_ERROR, "audin_winmm_thread_func reported an error");
@@ -152,7 +162,7 @@ static DWORD audin_winmm_thread_func(void* arg)
 	status = WaitForSingleObject(winmm->stopEvent, INFINITE);
 
 	if (status == WAIT_FAILED)
-{
+	{
 		DEBUG_DVC("WaitForSingleObject failed.");
 		if (winmm->rdpcontext)
 			setChannelError(winmm->rdpcontext, ERROR_INTERNAL_ERROR, "audin_winmm_thread_func reported an error");
@@ -219,20 +229,20 @@ static UINT audin_winmm_free(IAudinDevice* device)
  */
 static UINT audin_winmm_close(IAudinDevice* device)
 {
-    DWORD status;
-    UINT error = CHANNEL_RC_OK;
+	DWORD status;
+	UINT error = CHANNEL_RC_OK;
 	AudinWinmmDevice* winmm = (AudinWinmmDevice*) device;
 
 	SetEvent(winmm->stopEvent);
 
 	status = WaitForSingleObject(winmm->thread, INFINITE);
 
-    if (status == WAIT_FAILED)
-    {
-        error = GetLastError();
-        WLog_ERR(TAG, "WaitForSingleObject failed with error %"PRIu32"!", error);
-        return error;
-    }
+	if (status == WAIT_FAILED)
+	{
+		error = GetLastError();
+		WLog_ERR(TAG, "WaitForSingleObject failed with error %"PRIu32"!", error);
+		return error;
+	}
 
 	CloseHandle(winmm->thread);
 	CloseHandle(winmm->stopEvent);
@@ -250,7 +260,7 @@ static UINT audin_winmm_close(IAudinDevice* device)
  *
  * @return 0 on success, otherwise a Win32 error code
  */
-static UINT audin_winmm_set_format(IAudinDevice* device, audinFormat* format, UINT32 FramesPerPacket)
+static UINT audin_winmm_set_format(IAudinDevice* device, const AUDIO_FORMAT* format, UINT32 FramesPerPacket)
 {
 	UINT32 i;
 	AudinWinmmDevice* winmm = (AudinWinmmDevice*) device;
@@ -260,8 +270,8 @@ static UINT audin_winmm_set_format(IAudinDevice* device, audinFormat* format, UI
 	for (i = 0; i < winmm->cFormats; i++)
 	{
 		if (winmm->ppwfx[i]->wFormatTag == format->wFormatTag
-			&& winmm->ppwfx[i]->nChannels == format->nChannels
-			&& winmm->ppwfx[i]->wBitsPerSample == format->wBitsPerSample)
+				&& winmm->ppwfx[i]->nChannels == format->nChannels
+				&& winmm->ppwfx[i]->wBitsPerSample == format->wBitsPerSample)
 		{
 			winmm->pwfx_cur = winmm->ppwfx[i];
 			break;
@@ -270,7 +280,7 @@ static UINT audin_winmm_set_format(IAudinDevice* device, audinFormat* format, UI
 	return CHANNEL_RC_OK;
 }
 
-static BOOL audin_winmm_format_supported(IAudinDevice* device, audinFormat* format)
+static BOOL audin_winmm_format_supported(IAudinDevice* device, const AUDIO_FORMAT* format)
 {
 	AudinWinmmDevice* winmm = (AudinWinmmDevice*) device;
 	PWAVEFORMATEX pwfx;
@@ -305,7 +315,7 @@ static BOOL audin_winmm_format_supported(IAudinDevice* device, audinFormat* form
 				winmm->ppwfx = tmp_ppwfx;
 			}
 			winmm->ppwfx[winmm->cFormats++] = pwfx;
-	
+
 			return TRUE;
 		}
 	}
@@ -333,7 +343,7 @@ static UINT audin_winmm_open(IAudinDevice* device, AudinReceive receive, void* u
 	}
 
 	if (!(winmm->thread = CreateThread(NULL, 0,
-		(LPTHREAD_START_ROUTINE) audin_winmm_thread_func, winmm, 0, NULL)))
+									   audin_winmm_thread_func, winmm, 0, NULL)))
 	{
 		WLog_ERR(TAG, "CreateThread failed!");
 		CloseHandle(winmm->stopEvent);
@@ -374,7 +384,7 @@ static UINT audin_winmm_parse_addin_args(AudinWinmmDevice* device, ADDIN_ARGV* a
 
 		CommandLineSwitchStart(arg)
 
-		CommandLineSwitchCase(arg, "dev")
+				CommandLineSwitchCase(arg, "dev")
 		{
 			winmm->device_name = _strdup(arg->Value);
 			if (!winmm->device_name)
