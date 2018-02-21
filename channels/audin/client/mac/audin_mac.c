@@ -42,7 +42,6 @@
 #include <AudioToolbox/AudioQueue.h>
 
 #include <freerdp/addin.h>
-#include <freerdp/codec/dsp.h>
 #include <freerdp/channels/rdpsnd.h>
 
 #include "audin_main.h"
@@ -54,9 +53,7 @@ typedef struct _AudinMacDevice
 {
     IAudinDevice iface;
 
-    FREERDP_DSP_CONTEXT* dsp_context;
-
-    audinFormat format;
+    AUDIO_FORMAT format;
     UINT32 FramesPerPacket;
     int dev_unit;
 
@@ -71,7 +68,7 @@ typedef struct _AudinMacDevice
     AudioQueueBufferRef audioBuffers[MAC_AUDIO_QUEUE_NUM_BUFFERS];
 } AudinMacDevice;
 
-static AudioFormatID audin_mac_get_format(const audinFormat* format)
+static AudioFormatID audin_mac_get_format(const AUDIO_FORMAT* format)
 {
     switch (format->wFormatTag)
     {
@@ -95,7 +92,7 @@ static AudioFormatID audin_mac_get_format(const audinFormat* format)
     return 0;
 }
 
-static AudioFormatFlags audin_mac_get_flags_for_format(const audinFormat* format)
+static AudioFormatFlags audin_mac_get_flags_for_format(const AUDIO_FORMAT* format)
 {
     switch(format->wFormatTag)
     {
@@ -108,7 +105,7 @@ static AudioFormatFlags audin_mac_get_flags_for_format(const audinFormat* format
     }
 }
 
-static BOOL audin_mac_format_supported(IAudinDevice* device, audinFormat* format)
+static BOOL audin_mac_format_supported(IAudinDevice* device, const AUDIO_FORMAT* format)
 {
     AudioFormatID req_fmt = 0;
 
@@ -128,7 +125,7 @@ static BOOL audin_mac_format_supported(IAudinDevice* device, audinFormat* format
  *
  * @return 0 on success, otherwise a Win32 error code
  */
-static UINT audin_mac_set_format(IAudinDevice* device, audinFormat* format, UINT32 FramesPerPacket)
+static UINT audin_mac_set_format(IAudinDevice* device, const AUDIO_FORMAT* format, UINT32 FramesPerPacket)
 {
     AudinMacDevice* mac = (AudinMacDevice*)device;
 
@@ -136,7 +133,7 @@ static UINT audin_mac_set_format(IAudinDevice* device, audinFormat* format, UINT
         return ERROR_INVALID_PARAMETER;
 
     mac->FramesPerPacket = FramesPerPacket;
-    CopyMemory(&(mac->format), format, sizeof(audinFormat));
+    mac->format = *format;
 
     WLog_INFO(TAG, "Audio Format %s [channels=%d, samples=%d, bits=%d]",
               rdpsnd_get_audio_tag_string(format->wFormatTag),
@@ -174,9 +171,7 @@ static void mac_audio_queue_input_cb(void *aqData,
 {
     AudinMacDevice* mac = (AudinMacDevice*)aqData;
     UINT error;
-    int encoded_size = 0;
-    const BYTE *encoded_data;
-    BYTE *buffer = inBuffer->mAudioData;
+    const BYTE *buffer = inBuffer->mAudioData;
     int buffer_size = inBuffer->mAudioDataByteSize;
 
     (void)inAQ;
@@ -184,36 +179,8 @@ static void mac_audio_queue_input_cb(void *aqData,
     (void)inNumPackets;
     (void)inPacketDesc;
 
-
- 	/* Process. */
-    switch (mac->format.wFormatTag) {
-    case WAVE_FORMAT_ADPCM:
-        if (!mac->dsp_context->encode_ms_adpcm(mac->dsp_context,
-                                               buffer, buffer_size, mac->format.nChannels, mac->format.nBlockAlign))
-        {
-            SetLastError(ERROR_INTERNAL_ERROR);
-            return;
-        }
-        encoded_data = mac->dsp_context->adpcm_buffer;
-        encoded_size = mac->dsp_context->adpcm_size;
-        break;
-    case WAVE_FORMAT_DVI_ADPCM:
-        if (!mac->dsp_context->encode_ima_adpcm(mac->dsp_context,
-                                                buffer, buffer_size, mac->format.nChannels, mac->format.nBlockAlign))
-        {
-            SetLastError(ERROR_INTERNAL_ERROR);
-            break;
-        }
-        encoded_data = mac->dsp_context->adpcm_buffer;
-        encoded_size = mac->dsp_context->adpcm_size;
-        break;
-    default:
-        encoded_data = buffer;
-        encoded_size = buffer_size;
-        break;
-    }
-
-    if ((error = mac->receive(encoded_data, encoded_size, mac->user_data)))
+    if ((error = mac->receive(&mac->format, mac->audioFormat.mFramesPerPacket,
+				buffer, buffer_size, mac->user_data)))
     {
         WLog_ERR(TAG, "mac->receive failed with error %"PRIu32"", error);
         SetLastError(ERROR_INTERNAL_ERROR);
@@ -308,8 +275,6 @@ static UINT audin_mac_open(IAudinDevice *device, AudinReceive receive, void *use
         }
     }
 
-    freerdp_dsp_context_reset_adpcm(mac->dsp_context);
-
     devStat = AudioQueueStart(mac->audioQueue, NULL);
     if (devStat != 0)
     {
@@ -340,7 +305,6 @@ static UINT audin_mac_free(IAudinDevice* device)
     {
         WLog_ERR(TAG, "audin_oss_close failed with error code %d!", error);
     }
-    freerdp_dsp_context_free(mac->dsp_context);
     free(mac);
 
     return CHANNEL_RC_OK;
@@ -442,14 +406,6 @@ UINT freerdp_audin_client_subsystem_entry(PFREERDP_AUDIN_DEVICE_ENTRY_POINTS pEn
         goto error_out;
     }
 
-    mac->dsp_context = freerdp_dsp_context_new();
-    if (!mac->dsp_context)
-    {
-        WLog_ERR(TAG, "freerdp_dsp_context_new failed!");
-        error = CHANNEL_RC_NO_MEMORY;
-        goto error_out;
-    }
-
     if ((error = pEntryPoints->pRegisterAudinDevice(pEntryPoints->plugin, (IAudinDevice*) mac)))
     {
         WLog_ERR(TAG, "RegisterAudinDevice failed with error %"PRIu32"!", error);
@@ -459,7 +415,6 @@ UINT freerdp_audin_client_subsystem_entry(PFREERDP_AUDIN_DEVICE_ENTRY_POINTS pEn
     return CHANNEL_RC_OK;
 
 error_out:
-    freerdp_dsp_context_free(mac->dsp_context);
     free(mac);
     return error;
 
