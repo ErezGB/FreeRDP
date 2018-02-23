@@ -155,6 +155,13 @@ if(WITH_SSE2)
 	endif()
 endif()
 
+if (WITH_FFMPEG)
+	set(CODEC_SRCS
+		${CODEC_SRCS}
+		codec/dsp_ffmpeg.c
+		codec/dsp_ffmpeg.h)
+endif (WITH_FFMPEG)
+
 if(WITH_NEON)
 	set_source_files_properties(${CODEC_NEON_SRCS} PROPERTIES COMPILE_FLAGS "-mfpu=neon -Wno-unused-variable" )
 	set(CODEC_SRCS ${CODEC_SRCS} ${CODEC_NEON_SRCS})

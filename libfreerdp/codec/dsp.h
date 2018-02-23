@@ -1,6 +1,6 @@
 /**
  * FreeRDP: A Remote Desktop Protocol Implementation
- * Audio Output Virtual Channel - FFMPEG decoder
+ * Digital Sound Processing - backend
  *
  * Copyright 2018 Armin Novak <armin.novak@thincast.com>
  * Copyright 2018 Thincast Technologies GmbH
@@ -18,26 +18,17 @@
  * limitations under the License.
  */
 
-#ifndef FREERDP_CHANNEL_RDPSND_CLIENT_FFMPEG_H
-#define FREERDP_CHANNEL_RDPSND_CLIENT_FFMPEG_H
-
-#include <winpr/stream.h>
+#ifndef FREERDP_LIB_CODEC_DSP_H
+#define FREERDP_LIB_CODEC_DSP_H
 
 #include <freerdp/api.h>
 #include <freerdp/codec/audio.h>
+#include <freerdp/codec/dsp.h>
 
-typedef struct rdpsnd_ffmpeg_ctx RDPSND_FFMPEG;
+struct _FREERDP_DSP_COMMON_CONTEXT
+{
+	wStream* buffer;
+	wStream* resample;
+};
 
-BOOL rdpnsd_ffmpeg_initialize(void);
-BOOL rdpnsd_ffmpeg_uninitialize(void);
-
-BOOL rdpsnd_ffmpeg_format_supported(const AUDIO_FORMAT* format);
-
-RDPSND_FFMPEG* rdpsnd_ffmpeg_open(const AUDIO_FORMAT* format);
-void rdpsnd_ffmpeg_close(RDPSND_FFMPEG* context);
-
-size_t rdpsnd_ffmpeg_decode(RDPSND_FFMPEG* context,
-                            const BYTE* data, size_t size,
-                            wStream* out, UINT16* sample_length);
-
-#endif /* FREERDP_CHANNEL_RDPSND_CLIENT_FFMPEG_H */
+#endif /* FREERDP_LIB_CODEC_DSP_H */

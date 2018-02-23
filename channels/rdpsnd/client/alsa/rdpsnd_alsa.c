@@ -183,7 +183,7 @@ static int rdpsnd_alsa_set_params(rdpsndAlsaPlugin* alsa)
 }
 
 static BOOL rdpsnd_alsa_set_format(rdpsndDevicePlugin* device, const AUDIO_FORMAT* format,
-                                   int latency)
+                                   UINT32 latency)
 {
 	rdpsndAlsaPlugin* alsa = (rdpsndAlsaPlugin*) device;
 
@@ -276,7 +276,7 @@ static BOOL rdpsnd_alsa_open_mixer(rdpsndAlsaPlugin* alsa)
 	return TRUE;
 }
 
-static BOOL rdpsnd_alsa_open(rdpsndDevicePlugin* device, const AUDIO_FORMAT* format, int latency)
+static BOOL rdpsnd_alsa_open(rdpsndDevicePlugin* device, const AUDIO_FORMAT* format, UINT32 latency)
 {
 	int mode;
 	int status;
@@ -429,6 +429,41 @@ static BOOL rdpsnd_alsa_set_volume(rdpsndDevicePlugin* device, UINT32 value)
 	return TRUE;
 }
 
+static void rdpsnd_alsa_play(rdpsndDevicePlugin* device, const BYTE* data, size_t size)
+{
+	size_t offset;
+	int frame_size;
+	rdpsndAlsaPlugin* alsa = (rdpsndAlsaPlugin*) device;
+	offset = 0;
+	frame_size = alsa->actual_channels * alsa->bytes_per_channel;
+
+	while (offset < size)
+	{
+		snd_pcm_sframes_t status = snd_pcm_writei(alsa->pcm_handle, &data[offset],
+		                           (size - offset) / frame_size);
+
+		if (status == -EPIPE)
+		{
+			snd_pcm_recover(alsa->pcm_handle, status, 0);
+			status = 0;
+		}
+		else if (status == -EAGAIN)
+		{
+			status = 0;
+		}
+		else if (status < 0)
+		{
+			WLog_ERR(TAG,  "status: %d\n", status);
+			snd_pcm_close(alsa->pcm_handle);
+			alsa->pcm_handle = NULL;
+			rdpsnd_alsa_open((rdpsndDevicePlugin*) alsa, NULL, alsa->latency);
+			break;
+		}
+
+		offset += status * frame_size;
+	}
+}
+
 static COMMAND_LINE_ARGUMENT_A rdpsnd_alsa_args[] =
 {
 	{ "dev", COMMAND_LINE_VALUE_REQUIRED, "<device>", NULL, NULL, -1, NULL, "device" },
@@ -504,9 +539,9 @@ UINT freerdp_rdpsnd_client_subsystem_entry(PFREERDP_RDPSND_DEVICE_ENTRY_POINTS p
 
 	alsa->device.Open = rdpsnd_alsa_open;
 	alsa->device.FormatSupported = rdpsnd_alsa_format_supported;
-	alsa->device.SetFormat = rdpsnd_alsa_set_format;
 	alsa->device.GetVolume = rdpsnd_alsa_get_volume;
 	alsa->device.SetVolume = rdpsnd_alsa_set_volume;
+	alsa->device.Play = rdpsnd_alsa_play;
 	alsa->device.Close = rdpsnd_alsa_close;
 	alsa->device.Free = rdpsnd_alsa_free;
 	args = pEntryPoints->args;

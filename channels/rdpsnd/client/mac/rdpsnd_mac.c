@@ -290,6 +290,7 @@ UINT freerdp_rdpsnd_client_subsystem_entry(PFREERDP_RDPSND_DEVICE_ENTRY_POINTS p
 	mac->device.FormatSupported = rdpsnd_mac_format_supported;
 	mac->device.SetFormat = rdpsnd_mac_set_format;
 	mac->device.SetVolume = rdpsnd_mac_set_volume;
+	mac->device.Play = rdpsnd_mac_play;
 	mac->device.Start = rdpsnd_mac_start;
 	mac->device.Close = rdpsnd_mac_close;
 	mac->device.Free = rdpsnd_mac_free;

@@ -63,7 +63,7 @@ struct rdpsnd_oss_plugin
 
 	int supported_formats;
 
-	int latency;
+	UINT32 latency;
 	AUDIO_FORMAT format;
 };
 
@@ -145,7 +145,7 @@ static BOOL rdpsnd_oss_format_supported(rdpsndDevicePlugin* device, const AUDIO_
 }
 
 static BOOL rdpsnd_oss_set_format(rdpsndDevicePlugin* device, const AUDIO_FORMAT* format,
-                                  int latency)
+                                  UINT32 latency)
 {
 	int tmp;
 	rdpsndOssPlugin* oss = (rdpsndOssPlugin*)device;
@@ -217,7 +217,7 @@ static void rdpsnd_oss_open_mixer(rdpsndOssPlugin* oss)
 	}
 }
 
-static BOOL rdpsnd_oss_open(rdpsndDevicePlugin* device, const AUDIO_FORMAT* format, int latency)
+static BOOL rdpsnd_oss_open(rdpsndDevicePlugin* device, const AUDIO_FORMAT* format, UINT32 latency)
 {
 	char dev_name[PATH_MAX] = "/dev/dsp";
 	rdpsndOssPlugin* oss = (rdpsndOssPlugin*)device;
@@ -358,6 +358,34 @@ static BOOL rdpsnd_oss_set_volume(rdpsndDevicePlugin* device, UINT32 value)
 	return TRUE;
 }
 
+static void rdpsnd_oss_play(rdpsndDevicePlugin* device, const BYTE* data, size_t size)
+{
+	rdpsndOssPlugin* oss = (rdpsndOssPlugin*)device;
+
+	if (device == NULL || oss->mixer_handle == -1)
+		return;
+
+	while (size > 0)
+	{
+		ssize_t status = write(oss->pcm_handle, data, size);
+
+		if (status < 0)
+		{
+			OSS_LOG_ERR("write fail", errno);
+			rdpsnd_oss_close(device);
+			rdpsnd_oss_open(device, NULL, oss->latency);
+			break;
+		}
+
+		data += status;
+
+		if (status <= size)
+			size -= status;
+		else
+			size = 0;
+	}
+}
+
 static COMMAND_LINE_ARGUMENT_A rdpsnd_oss_args[] =
 {
 	{ "dev", COMMAND_LINE_VALUE_REQUIRED, "<device>", NULL, NULL, -1, NULL, "device" },
@@ -440,9 +468,9 @@ UINT freerdp_rdpsnd_client_subsystem_entry(PFREERDP_RDPSND_DEVICE_ENTRY_POINTS p
 
 	oss->device.Open = rdpsnd_oss_open;
 	oss->device.FormatSupported = rdpsnd_oss_format_supported;
-	oss->device.SetFormat = rdpsnd_oss_set_format;
 	oss->device.GetVolume = rdpsnd_oss_get_volume;
 	oss->device.SetVolume = rdpsnd_oss_set_volume;
+	oss->device.Play = rdpsnd_oss_play;
 	oss->device.Close = rdpsnd_oss_close;
 	oss->device.Free = rdpsnd_oss_free;
 	oss->pcm_handle = -1;

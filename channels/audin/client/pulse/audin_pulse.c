@@ -302,7 +302,7 @@ static void audin_pulse_stream_request_callback(pa_stream* stream, size_t length
 	pa_stream_drop(stream);
 
 	if (error && pulse->rdpcontext)
-		setChannelError(pulse->rdpcontext, error, "audin_oss_thread_func reported an error");
+		setChannelError(pulse->rdpcontext, error, "audin_pulse_thread_func reported an error");
 }
 
 

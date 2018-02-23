@@ -47,14 +47,6 @@
 #include <freerdp/addin.h>
 #include <freerdp/codec/dsp.h>
 
-#if defined(WITH_FFMPEG)
-#include "rdpsnd_ffmpeg.h"
-#endif
-
-#ifdef WITH_GSM
-#include <gsm/gsm.h>
-#endif
-
 #include "rdpsnd_main.h"
 
 struct _RDPSND_WAVE
@@ -94,7 +86,6 @@ struct rdpsnd_plugin
 	BYTE cBlockNo;
 	UINT16 wQualityMode;
 	UINT16 wCurrentFormatNo;
-	BOOL useGenericDecoder;
 
 	AUDIO_FORMAT* ServerFormats;
 	UINT16 NumberOfServerFormats;
@@ -109,7 +100,7 @@ struct rdpsnd_plugin
 	UINT16 waveDataSize;
 	UINT32 wTimeStamp;
 
-	int latency;
+	UINT32 latency;
 	BOOL isOpen;
 	UINT16 fixedFormat;
 	UINT16 fixedChannel;
@@ -124,12 +115,6 @@ struct rdpsnd_plugin
 
 	wQueue* queue;
 	FREERDP_DSP_CONTEXT* dsp_context;
-#ifdef WITH_GSM
-	gsm gsm_context;
-#endif
-#if defined(WITH_FFMPEG)
-	RDPSND_FFMPEG* context;
-#endif
 };
 
 /**
@@ -140,29 +125,6 @@ struct rdpsnd_plugin
 static UINT rdpsnd_confirm_wave(rdpsndPlugin* rdpsnd, const RDPSND_WAVE* wave);
 static UINT rdpsnd_virtual_channel_write(rdpsndPlugin* rdpsnd, wStream* s);
 
-static BOOL rdpsnd_generic_format_supported(const AUDIO_FORMAT* format)
-{
-#if defined(WITH_FFMPEG)
-
-	if (rdpsnd_ffmpeg_format_supported(format))
-		return TRUE;
-
-#endif
-
-	switch (format->wFormatTag)
-	{
-#ifdef WITH_GSM
-
-		case WAVE_FORMAT_GSM610:
-#endif
-		case WAVE_FORMAT_ADPCM:
-		case WAVE_FORMAT_DVI_ADPCM:
-			return TRUE;
-
-		default:
-			return FALSE;
-	}
-}
 /**
  * Function description
  *
@@ -221,7 +183,7 @@ static void rdpsnd_select_supported_audio_formats(rdpsndPlugin* rdpsnd)
 		    (rdpsnd->fixedRate != serverFormat->nSamplesPerSec))
 			continue;
 
-		if (rdpsnd_generic_format_supported(serverFormat) ||
+		if (freerdp_dsp_supports_format(serverFormat, FALSE) ||
 		    rdpsnd->device->FormatSupported(rdpsnd->device, serverFormat))
 		{
 			AUDIO_FORMAT* clientFormat = &rdpsnd->ClientFormats[rdpsnd->NumberOfClientFormats++];
@@ -471,14 +433,8 @@ static UINT rdpsnd_recv_wave_info_pdu(rdpsndPlugin* rdpsnd, wStream* s,
 		AUDIO_FORMAT deviceFormat = *format;
 
 		if (rdpsnd->isOpen)
-		{
 			IFCALL(rdpsnd->device->Close, rdpsnd->device);
-#if defined(WITH_FFMPEG)
-			rdpsnd_ffmpeg_close(rdpsnd->context);
-#endif
-		}
 
-		rdpsnd->useGenericDecoder = FALSE;
 		rc = IFCALLRESULT(FALSE, rdpsnd->device->FormatSupported, rdpsnd->device, format);
 
 		if (!rc)
@@ -486,21 +442,20 @@ static UINT rdpsnd_recv_wave_info_pdu(rdpsndPlugin* rdpsnd, wStream* s,
 			deviceFormat.wFormatTag = WAVE_FORMAT_PCM;
 			deviceFormat.wBitsPerSample = 16;
 			deviceFormat.cbSize = 0;
-			rdpsnd->useGenericDecoder = TRUE;
 		}
 
-#if defined(WITH_FFMPEG)
-		rdpsnd->context = rdpsnd_ffmpeg_open(format);
-
-		if (!rdpsnd->context)
-			return CHANNEL_RC_INITIALIZATION_ERROR;
-
-#endif
 		rc = IFCALLRESULT(FALSE, rdpsnd->device->Open, rdpsnd->device, &deviceFormat, rdpsnd->latency);
-		freerdp_dsp_context_reset_adpcm(rdpsnd->dsp_context);
 
 		if (!rc)
 			return CHANNEL_RC_INITIALIZATION_ERROR;
+
+		rc = IFCALLRESULT(FALSE, rdpsnd->device->FormatSupported, rdpsnd->device, format);
+
+		if (!rc)
+		{
+			if (!freerdp_dsp_context_reset(rdpsnd->dsp_context, format))
+				return CHANNEL_RC_INITIALIZATION_ERROR;
+		}
 
 		rdpsnd->isOpen = TRUE;
 		rdpsnd->wCurrentFormatNo = wFormatNo;
@@ -583,109 +538,28 @@ static UINT rdpsnd_recv_wave_pdu(rdpsndPlugin* rdpsnd, wStream* s)
 	WLog_Print(rdpsnd->log, WLOG_DEBUG, "Wave: cBlockNo: %"PRIu8" wTimeStamp: %"PRIu16"",
 	           wave.cBlockNo, wave.wTimeStampA);
 
-	if (!rdpsnd->device)
+	if (rdpsnd->device)
 	{
-	}
-	else if (!rdpsnd->useGenericDecoder)
-		IFCALL(rdpsnd->device->Play, rdpsnd->device, data, size);
+		wStream* pcmData = StreamPool_Take(rdpsnd->pool, 4096);
 
-#if defined(WITH_FFMPEG)
-	else if (rdpsnd_ffmpeg_format_supported(format))
-	{
-		wStream* pcmData = StreamPool_Take(rdpsnd->pool, 128);
-
-		if (rdpsnd_ffmpeg_decode(rdpsnd->context, data, size, pcmData, &wave.wAudioLength))
+		if (rdpsnd->device->FormatSupported(rdpsnd->device, format))
 		{
-			IFCALL(rdpsnd->device->Play, rdpsnd->device,
-			       Stream_Buffer(pcmData), Stream_GetPosition(pcmData));
+			IFCALL(rdpsnd->device->Play, rdpsnd->device, data, size);
+			status = CHANNEL_RC_OK;
+		}
+		else if (freerdp_dsp_decode(rdpsnd->dsp_context, format, data, size, pcmData))
+		{
+			Stream_SealLength(pcmData);
+			IFCALL(rdpsnd->device->Play, rdpsnd->device, Stream_Buffer(pcmData), Stream_Length(pcmData));
+			status = CHANNEL_RC_OK;
 		}
 
 		StreamPool_Return(rdpsnd->pool, pcmData);
-	}
 
-#endif
-	else
-	{
-		BOOL success = TRUE;
-		wStream* pcmData = NULL;
-
-		switch (format->wFormatTag)
-		{
-			case WAVE_FORMAT_ADPCM:
-				rdpsnd->dsp_context->decode_ms_adpcm(rdpsnd->dsp_context,
-				                                     wave.data, wave.length,
-				                                     format->nChannels,
-				                                     format->nBlockAlign);
-				wave.length = rdpsnd->dsp_context->adpcm_size;
-				wave.data = rdpsnd->dsp_context->adpcm_buffer;
-				break;
-
-			case WAVE_FORMAT_DVI_ADPCM:
-				rdpsnd->dsp_context->decode_ima_adpcm(rdpsnd->dsp_context,
-				                                      wave.data, wave.length,
-				                                      format->nChannels,
-				                                      format->nBlockAlign);
-				wave.length = rdpsnd->dsp_context->adpcm_size;
-				wave.data = rdpsnd->dsp_context->adpcm_buffer;
-				break;
-#ifdef WITH_GSM
-
-			case WAVE_FORMAT_GSM610:
-				{
-					const size_t blockSize = 160 * sizeof(UINT16);
-					size_t inPos = 0;
-					size_t inSize = wave.length;
-					pcmData = StreamPool_Take(rdpsnd->pool, 128 * blockSize);
-					Stream_SetPosition(pcmData, 0);
-
-					while (inSize)
-					{
-						gsm_signal* gsmBlockBuffer = (gsm_signal*)Stream_Pointer(pcmData);
-						ZeroMemory(gsmBlockBuffer, blockSize);
-						gsm_decode(rdpsnd->gsm_context, (gsm_byte*) &data[inPos], gsmBlockBuffer);
-
-						if ((inPos % 65) == 0)
-						{
-							inPos += 33;
-							inSize -= 33;
-						}
-						else
-						{
-							inPos += 32;
-							inSize -= 32;
-						}
-
-						Stream_Seek(pcmData, blockSize);
-
-						if (!Stream_EnsureRemainingCapacity(pcmData, blockSize))
-						{
-							success = FALSE;
-							break;
-						}
-					}
-
-					Stream_SealLength(pcmData);
-					wave.data = Stream_Buffer(pcmData);
-					wave.length = Stream_Length(pcmData);
-				}
-				break;
-#endif
-
-			default:
-				break;
-		}
-
-		if (success)
-			IFCALL(rdpsnd->device->Play, rdpsnd->device, wave.data, wave.length);
-
-		if (pcmData)
-			StreamPool_Return(rdpsnd->pool, pcmData);
-
-		if (!success)
+		if (status)
 			return CHANNEL_RC_NULL_DATA;
 	}
 
-	status = CHANNEL_RC_OK;
 	wave.wLocalTimeB = GetTickCount();
 	wave.wTimeStampB = rdpsnd->wTimeStamp + wave.wAudioLength;
 
@@ -700,12 +574,7 @@ static void rdpsnd_recv_close_pdu(rdpsndPlugin* rdpsnd)
 	WLog_Print(rdpsnd->log, WLOG_DEBUG, "Close");
 
 	if (rdpsnd->isOpen)
-	{
 		IFCALL(rdpsnd->device->Close, rdpsnd->device);
-#if defined(WITH_FFMPEG)
-		rdpsnd_ffmpeg_close(rdpsnd->context);
-#endif
-	}
 
 	rdpsnd->isOpen = FALSE;
 }
@@ -1015,7 +884,7 @@ static UINT rdpsnd_process_connect(rdpsndPlugin* rdpsnd)
 	};
 	ADDIN_ARGV* args;
 	UINT status = ERROR_INTERNAL_ERROR;
-	rdpsnd->latency = -1;
+	rdpsnd->latency = 0;
 	args = (ADDIN_ARGV*) rdpsnd->channelEntryPoints.pExtendedData;
 
 	if (args)
@@ -1254,7 +1123,7 @@ static UINT rdpsnd_virtual_channel_event_connected(rdpsndPlugin* rdpsnd,
 		return status;
 	}
 
-	rdpsnd->dsp_context = freerdp_dsp_context_new();
+	rdpsnd->dsp_context = freerdp_dsp_context_new(FALSE);
 
 	if (!rdpsnd->dsp_context)
 		goto fail;
@@ -1351,19 +1220,8 @@ static UINT rdpsnd_virtual_channel_event_disconnected(rdpsndPlugin* rdpsnd)
 static void rdpsnd_virtual_channel_event_terminated(rdpsndPlugin* rdpsnd)
 {
 	if (rdpsnd)
-	{
-#ifdef WITH_GSM
-
-		if (rdpsnd->gsm_context)
-			gsm_destroy(rdpsnd->gsm_context);
-
-#endif
 		rdpsnd->InitHandle = 0;
-	}
 
-#if defined(WITH_FFMPEG)
-	rdpnsd_ffmpeg_uninitialize();
-#endif
 	free(rdpsnd);
 }
 
@@ -1450,20 +1308,6 @@ BOOL VCAPITYPE VirtualChannelEntryEx(PCHANNEL_ENTRY_POINTS pEntryPoints, PVOID p
 	CopyMemory(&(rdpsnd->channelEntryPoints), pEntryPoints,
 	           sizeof(CHANNEL_ENTRY_POINTS_FREERDP_EX));
 	rdpsnd->InitHandle = pInitHandle;
-#ifdef WITH_GSM
-
-	if (rdpsnd->gsm_context)
-		gsm_destroy(rdpsnd->gsm_context);
-
-	rdpsnd->gsm_context = gsm_create();
-
-	if (!rdpsnd->gsm_context)
-	{
-		free(rdpsnd);
-		return FALSE;
-	}
-
-#endif
 	rc = rdpsnd->channelEntryPoints.pVirtualChannelInitEx(rdpsnd, NULL, pInitHandle,
 	        &rdpsnd->channelDef, 1, VIRTUAL_CHANNEL_VERSION_WIN2000,
 	        rdpsnd_virtual_channel_init_event_ex);
@@ -1476,14 +1320,5 @@ BOOL VCAPITYPE VirtualChannelEntryEx(PCHANNEL_ENTRY_POINTS pEntryPoints, PVOID p
 		return FALSE;
 	}
 
-#if defined(WITH_FFMPEG)
-
-	if (!rdpnsd_ffmpeg_initialize())
-	{
-		free(rdpsnd);
-		return FALSE;
-	}
-
-#endif
 	return TRUE;
 }

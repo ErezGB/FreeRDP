@@ -28,8 +28,45 @@
 #include <winpr/crt.h>
 
 #include <freerdp/types.h>
-
 #include <freerdp/codec/dsp.h>
+
+#if defined(WITH_GSM)
+#include <gsm/gsm.h>
+#endif
+
+#if defined(WITH_FFMPEG)
+#include "dsp_ffmpeg.h"
+#endif
+
+union _ADPCM
+{
+	struct
+	{
+		INT16 last_sample[2];
+		INT16 last_step[2];
+	} ima;
+	struct
+	{
+		BYTE predictor[2];
+		INT32 delta[2];
+		INT32 sample1[2];
+		INT32 sample2[2];
+	} ms;
+};
+typedef union _ADPCM ADPCM;
+
+struct _FREERDP_DSP_CONTEXT
+{
+	ADPCM adpcm;
+	AUDIO_FORMAT format;
+
+	wStream* buffer;
+	wStream* resample;
+
+#ifdef WITH_GSM
+	gsm gsm;
+#endif
+};
 
 /**
  * Microsoft Multimedia Standards Update
@@ -37,35 +74,25 @@
  */
 
 static BOOL freerdp_dsp_resample(FREERDP_DSP_CONTEXT* context,
-	const BYTE* src, int bytes_per_sample,
-	UINT32 schan, UINT32 srate, int sframes,
-	UINT32 rchan, UINT32 rrate)
+                                 const BYTE* src, size_t bytes_per_sample,
+                                 UINT32 schan, UINT32 srate, size_t sframes,
+                                 UINT32 rchan, UINT32 rrate)
 {
-	BYTE* dst;
 	BYTE* p;
 	int rframes;
 	int rsize;
 	int i, j;
 	int n1, n2;
 	int sbytes, rbytes;
-
 	sbytes = bytes_per_sample * schan;
 	rbytes = bytes_per_sample * rchan;
 	rframes = sframes * rrate / srate;
 	rsize = rbytes * rframes;
 
-	if (rsize > (int) context->resampled_maxlength)
-	{
-		BYTE *newBuffer = (BYTE*) realloc(context->resampled_buffer, rsize + 1024);
-		if (!newBuffer)
-			return FALSE;
+	if (!Stream_EnsureCapacity(context->resample, rsize + 1024))
+		return FALSE;
 
-		context->resampled_maxlength = rsize + 1024;
-		context->resampled_buffer = newBuffer;
-	}
-	dst = context->resampled_buffer;
-
-	p = dst;
+	p = Stream_Buffer(context->resample);
 
 	for (i = 0; i < rframes; i++)
 	{
@@ -80,13 +107,13 @@ static BOOL freerdp_dsp_resample(FREERDP_DSP_CONTEXT* context,
 		{
 			/* Nearest Interpolation, probably the easiest, but works */
 			*p++ = (i * srate - n1 * rrate > n2 * rrate - i * srate ?
-				src[n2 * sbytes + (j % sbytes)] :
-				src[n1 * sbytes + (j % sbytes)]);
+			        src[n2 * sbytes + (j % sbytes)] :
+			        src[n1 * sbytes + (j % sbytes)]);
 		}
 	}
 
-	context->resampled_frames = rframes;
-	context->resampled_size = rsize;
+	Stream_SetPointer(context->resample, p);
+	Stream_SealLength(context->resample);
 	return TRUE;
 }
 
@@ -105,33 +132,34 @@ static const INT16 ima_step_index_table[] =
 
 static const INT16 ima_step_size_table[] =
 {
-	7, 8, 9, 10, 11, 12, 13, 14, 16, 17, 
-	19, 21, 23, 25, 28, 31, 34, 37, 41, 45, 
-	50, 55, 60, 66, 73, 80, 88, 97, 107, 118, 
+	7, 8, 9, 10, 11, 12, 13, 14, 16, 17,
+	19, 21, 23, 25, 28, 31, 34, 37, 41, 45,
+	50, 55, 60, 66, 73, 80, 88, 97, 107, 118,
 	130, 143, 157, 173, 190, 209, 230, 253, 279, 307,
 	337, 371, 408, 449, 494, 544, 598, 658, 724, 796,
-	876, 963, 1060, 1166, 1282, 1411, 1552, 1707, 1878, 2066, 
+	876, 963, 1060, 1166, 1282, 1411, 1552, 1707, 1878, 2066,
 	2272, 2499, 2749, 3024, 3327, 3660, 4026, 4428, 4871, 5358,
-	5894, 6484, 7132, 7845, 8630, 9493, 10442, 11487, 12635, 13899, 
-	15289, 16818, 18500, 20350, 22385, 24623, 27086, 29794, 32767 
+	5894, 6484, 7132, 7845, 8630, 9493, 10442, 11487, 12635, 13899,
+	15289, 16818, 18500, 20350, 22385, 24623, 27086, 29794, 32767
 };
 
 static UINT16 dsp_decode_ima_adpcm_sample(ADPCM* adpcm,
-	unsigned int channel, BYTE sample)
+        unsigned int channel, BYTE sample)
 {
 	INT32 ss;
 	INT32 d;
-
 	ss = ima_step_size_table[adpcm->ima.last_step[channel]];
-
 	d = (ss >> 3);
 
 	if (sample & 1)
 		d += (ss >> 2);
+
 	if (sample & 2)
 		d += (ss >> 1);
+
 	if (sample & 4)
 		d += ss;
+
 	if (sample & 8)
 		d = -d;
 
@@ -143,7 +171,6 @@ static UINT16 dsp_decode_ima_adpcm_sample(ADPCM* adpcm,
 		d = 32767;
 
 	adpcm->ima.last_sample[channel] = (INT16) d;
-
 	adpcm->ima.last_step[channel] += ima_step_index_table[sample];
 
 	if (adpcm->ima.last_step[channel] < 0)
@@ -155,7 +182,7 @@ static UINT16 dsp_decode_ima_adpcm_sample(ADPCM* adpcm,
 }
 
 static BOOL freerdp_dsp_decode_ima_adpcm(FREERDP_DSP_CONTEXT* context,
-	const BYTE* src, int size, int channels, int block_size)
+        const BYTE* src, int size, int channels, int block_size)
 {
 	BYTE* dst;
 	BYTE sample;
@@ -163,35 +190,27 @@ static BOOL freerdp_dsp_decode_ima_adpcm(FREERDP_DSP_CONTEXT* context,
 	UINT32 out_size;
 	int channel;
 	int i;
-
 	out_size = size * 4;
 
-	if (out_size > context->adpcm_maxlength)
-	{
-		BYTE *newBuffer = realloc(context->adpcm_buffer, out_size + 1024);
-		if (!newBuffer)
-			return FALSE;
+	if (!Stream_EnsureCapacity(context->buffer, out_size))
+		return FALSE;
 
-		context->adpcm_maxlength = out_size + 1024;
-		context->adpcm_buffer = newBuffer;
-	}
-
-	dst = context->adpcm_buffer;
+	dst = Stream_Buffer(context->buffer);
 
 	while (size > 0)
 	{
 		if (size % block_size == 0)
 		{
-			context->adpcm.ima.last_sample[0] = (INT16) (((UINT16)(*src)) | (((UINT16)(*(src + 1))) << 8));
-			context->adpcm.ima.last_step[0] = (INT16) (*(src + 2));
+			context->adpcm.ima.last_sample[0] = (INT16)(((UINT16)(*src)) | (((UINT16)(*(src + 1))) << 8));
+			context->adpcm.ima.last_step[0] = (INT16)(*(src + 2));
 			src += 4;
 			size -= 4;
 			out_size -= 16;
 
 			if (channels > 1)
 			{
-				context->adpcm.ima.last_sample[1] = (INT16) (((UINT16)(*src)) | (((UINT16)(*(src + 1))) << 8));
-				context->adpcm.ima.last_step[1] = (INT16) (*(src + 2));
+				context->adpcm.ima.last_sample[1] = (INT16)(((UINT16)(*src)) | (((UINT16)(*(src + 1))) << 8));
+				context->adpcm.ima.last_step[1] = (INT16)(*(src + 2));
 				src += 4;
 				size -= 4;
 				out_size -= 16;
@@ -204,12 +223,10 @@ static BOOL freerdp_dsp_decode_ima_adpcm(FREERDP_DSP_CONTEXT* context,
 			{
 				channel = (i < 4 ? 0 : 1);
 				sample = ((*src) & 0x0f);
-
 				decoded = dsp_decode_ima_adpcm_sample(&context->adpcm, channel, sample);
 				dst[((i & 3) << 3) + (channel << 1)] = (decoded & 0xFF);
 				dst[((i & 3) << 3) + (channel << 1) + 1] = (decoded >> 8);
 				sample = ((*src) >> 4);
-
 				decoded = dsp_decode_ima_adpcm_sample(&context->adpcm, channel, sample);
 				dst[((i & 3) << 3) + (channel << 1) + 4] = (decoded & 0xFF);
 				dst[((i & 3) << 3) + (channel << 1) + 5] = (decoded >> 8);
@@ -222,12 +239,10 @@ static BOOL freerdp_dsp_decode_ima_adpcm(FREERDP_DSP_CONTEXT* context,
 		else
 		{
 			sample = ((*src) & 0x0f);
-
 			decoded = dsp_decode_ima_adpcm_sample(&context->adpcm, 0, sample);
 			*dst++ = (decoded & 0xFF);
 			*dst++ = (decoded >> 8);
 			sample = ((*src) >> 4);
-
 			decoded = dsp_decode_ima_adpcm_sample(&context->adpcm, 0, sample);
 			*dst++ = (decoded & 0xFF);
 			*dst++ = (decoded >> 8);
@@ -236,7 +251,7 @@ static BOOL freerdp_dsp_decode_ima_adpcm(FREERDP_DSP_CONTEXT* context,
 		}
 	}
 
-	context->adpcm_size = dst - context->adpcm_buffer;
+	Stream_SetPointer(context->buffer, dst);
 	return TRUE;
 }
 
@@ -278,7 +293,6 @@ static BYTE dsp_encode_ima_adpcm_sample(ADPCM* adpcm, int channel, INT16 sample)
 	INT32 ss;
 	BYTE enc;
 	INT32 diff;
-
 	ss = ima_step_size_table[adpcm->ima.last_step[channel]];
 	d = e = sample - adpcm->ima.last_sample[channel];
 	diff = ss >> 3;
@@ -325,7 +339,6 @@ static BYTE dsp_encode_ima_adpcm_sample(ADPCM* adpcm, int channel, INT16 sample)
 		diff = 32767;
 
 	adpcm->ima.last_sample[channel] = (INT16) diff;
-
 	adpcm->ima.last_step[channel] += ima_step_index_table[enc];
 
 	if (adpcm->ima.last_step[channel] < 0)
@@ -337,38 +350,30 @@ static BYTE dsp_encode_ima_adpcm_sample(ADPCM* adpcm, int channel, INT16 sample)
 }
 
 static BOOL freerdp_dsp_encode_ima_adpcm(FREERDP_DSP_CONTEXT* context,
-	const BYTE* src, int size, int channels, int block_size)
+        const BYTE* src, size_t size, wStream* out)
 {
 	int i;
 	BYTE* dst;
 	INT16 sample;
 	BYTE encoded;
 	UINT32 out_size;
-
 	out_size = size / 2;
 
-	if (out_size > context->adpcm_maxlength)
-	{
-		BYTE *newBuffer = realloc(context->adpcm_buffer, out_size + 1024);
-		if (!newBuffer)
-			return FALSE;
+	if (!Stream_EnsureRemainingCapacity(out, out_size))
+		return FALSE;
 
-		context->adpcm_maxlength = out_size + 1024;
-		context->adpcm_buffer = newBuffer;
-	}
-
-	dst = context->adpcm_buffer;
+	dst = Stream_Buffer(out);
 
 	while (size > 0)
 	{
-		if ((dst - context->adpcm_buffer) % block_size == 0)
+		if ((dst - Stream_Buffer(out)) % context->format.nBlockAlign == 0)
 		{
 			*dst++ = context->adpcm.ima.last_sample[0] & 0xFF;
 			*dst++ = (context->adpcm.ima.last_sample[0] >> 8) & 0xFF;
 			*dst++ = (BYTE) context->adpcm.ima.last_step[0];
 			*dst++ = 0;
 
-			if (channels > 1)
+			if (context->format.nChannels > 1)
 			{
 				*dst++ = context->adpcm.ima.last_sample[1] & 0xFF;
 				*dst++ = (context->adpcm.ima.last_sample[1] >> 8) & 0xFF;
@@ -377,13 +382,13 @@ static BOOL freerdp_dsp_encode_ima_adpcm(FREERDP_DSP_CONTEXT* context,
 			}
 		}
 
-		if (channels > 1)
+		if (context->format.nChannels > 1)
 		{
 			ZeroMemory(dst, 8);
 
 			for (i = 0; i < 16; i++)
 			{
-				sample = (INT16) (((UINT16)(*src)) | (((UINT16)(*(src + 1))) << 8));
+				sample = (INT16)(((UINT16)(*src)) | (((UINT16)(*(src + 1))) << 8));
 				src += 2;
 				encoded = dsp_encode_ima_adpcm_sample(&context->adpcm, i % 2, sample);
 				dst[ima_stereo_encode_map[i].byte_num] |= encoded << ima_stereo_encode_map[i].byte_shift;
@@ -394,18 +399,18 @@ static BOOL freerdp_dsp_encode_ima_adpcm(FREERDP_DSP_CONTEXT* context,
 		}
 		else
 		{
-			sample = (INT16) (((UINT16)(*src)) | (((UINT16)(*(src + 1))) << 8));
+			sample = (INT16)(((UINT16)(*src)) | (((UINT16)(*(src + 1))) << 8));
 			src += 2;
 			encoded = dsp_encode_ima_adpcm_sample(&context->adpcm, 0, sample);
-			sample = (INT16) (((UINT16)(*src)) | (((UINT16)(*(src + 1))) << 8));
+			sample = (INT16)(((UINT16)(*src)) | (((UINT16)(*(src + 1))) << 8));
 			src += 2;
 			encoded |= dsp_encode_ima_adpcm_sample(&context->adpcm, 0, sample) << 4;
 			*dst++ = encoded;
 			size -= 4;
 		}
 	}
-	
-	context->adpcm_size = dst - context->adpcm_buffer;
+
+	Stream_SetPointer(out, dst);
 	return TRUE;
 }
 
@@ -435,12 +440,9 @@ static INLINE INT16 freerdp_dsp_decode_ms_adpcm_sample(ADPCM* adpcm, BYTE sample
 {
 	INT8 nibble;
 	INT32 presample;
-
 	nibble = (sample & 0x08 ? (INT8) sample - 16 : sample);
-
 	presample = ((adpcm->ms.sample1[channel] * ms_adpcm_coeffs1[adpcm->ms.predictor[channel]]) +
-		(adpcm->ms.sample2[channel] * ms_adpcm_coeffs2[adpcm->ms.predictor[channel]])) / 256;
-
+	             (adpcm->ms.sample2[channel] * ms_adpcm_coeffs2[adpcm->ms.predictor[channel]])) / 256;
 	presample += nibble * adpcm->ms.delta[channel];
 
 	if (presample > 32767)
@@ -459,25 +461,17 @@ static INLINE INT16 freerdp_dsp_decode_ms_adpcm_sample(ADPCM* adpcm, BYTE sample
 }
 
 static BOOL freerdp_dsp_decode_ms_adpcm(FREERDP_DSP_CONTEXT* context,
-	const BYTE* src, int size, int channels, int block_size)
+                                        const BYTE* src, int size, int channels, int block_size)
 {
 	BYTE* dst;
 	BYTE sample;
 	UINT32 out_size;
-
 	out_size = size * 4;
 
-	if (out_size > context->adpcm_maxlength)
-	{
-		BYTE *newBuffer = realloc(context->adpcm_buffer, out_size + 1024);
-		if (!newBuffer)
-			return FALSE;
+	if (!Stream_EnsureCapacity(context->buffer, out_size))
+		return FALSE;
 
-		context->adpcm_maxlength = out_size + 1024;
-		context->adpcm_buffer = newBuffer;
-	}
-
-	dst = context->adpcm_buffer;
+	dst = Stream_Buffer(context->buffer);
 
 	while (size > 0)
 	{
@@ -500,7 +494,6 @@ static BOOL freerdp_dsp_decode_ms_adpcm(FREERDP_DSP_CONTEXT* context,
 				context->adpcm.ms.sample2[1] = *((INT16*) src);
 				src += 2;
 				size -= 14;
-
 				*((INT16*) dst) = context->adpcm.ms.sample2[0];
 				dst += 2;
 				*((INT16*) dst) = context->adpcm.ms.sample2[1];
@@ -520,7 +513,6 @@ static BOOL freerdp_dsp_decode_ms_adpcm(FREERDP_DSP_CONTEXT* context,
 				context->adpcm.ms.sample2[0] = *((INT16*) src);
 				src += 2;
 				size -= 7;
-
 				*((INT16*) dst) = context->adpcm.ms.sample2[0];
 				dst += 2;
 				*((INT16*) dst) = context->adpcm.ms.sample1[0];
@@ -536,7 +528,6 @@ static BOOL freerdp_dsp_decode_ms_adpcm(FREERDP_DSP_CONTEXT* context,
 			dst += 2;
 			*((INT16*) dst) = freerdp_dsp_decode_ms_adpcm_sample(&context->adpcm, sample & 0x0F, 1);
 			dst += 2;
-
 			sample = *src++;
 			size--;
 			*((INT16*) dst) = freerdp_dsp_decode_ms_adpcm_sample(&context->adpcm, sample >> 4, 0);
@@ -555,7 +546,7 @@ static BOOL freerdp_dsp_decode_ms_adpcm(FREERDP_DSP_CONTEXT* context,
 		}
 	}
 
-	context->adpcm_size = dst - context->adpcm_buffer;
+	Stream_SetPointer(context->buffer, dst);
 	return TRUE;
 }
 
@@ -563,9 +554,8 @@ static BYTE freerdp_dsp_encode_ms_adpcm_sample(ADPCM* adpcm, INT32 sample, int c
 {
 	INT32 presample;
 	INT32 errordelta;
-
 	presample = ((adpcm->ms.sample1[channel] * ms_adpcm_coeffs1[adpcm->ms.predictor[channel]]) +
-		(adpcm->ms.sample2[channel] * ms_adpcm_coeffs2[adpcm->ms.predictor[channel]])) / 256;
+	             (adpcm->ms.sample2[channel] * ms_adpcm_coeffs2[adpcm->ms.predictor[channel]])) / 256;
 	errordelta = (sample - presample) / adpcm->ms.delta[channel];
 
 	if ((sample - presample) % adpcm->ms.delta[channel] > adpcm->ms.delta[channel] / 2)
@@ -585,7 +575,8 @@ static BYTE freerdp_dsp_encode_ms_adpcm_sample(ADPCM* adpcm, INT32 sample, int c
 
 	adpcm->ms.sample2[channel] = adpcm->ms.sample1[channel];
 	adpcm->ms.sample1[channel] = presample;
-	adpcm->ms.delta[channel] = adpcm->ms.delta[channel] * ms_adpcm_adaptation_table[(((BYTE) errordelta) & 0x0F)] / 256;
+	adpcm->ms.delta[channel] = adpcm->ms.delta[channel] * ms_adpcm_adaptation_table[(((
+	                               BYTE) errordelta) & 0x0F)] / 256;
 
 	if (adpcm->ms.delta[channel] < 16)
 		adpcm->ms.delta[channel] = 16;
@@ -593,26 +584,18 @@ static BYTE freerdp_dsp_encode_ms_adpcm_sample(ADPCM* adpcm, INT32 sample, int c
 	return ((BYTE) errordelta) & 0x0F;
 }
 
-static BOOL freerdp_dsp_encode_ms_adpcm(FREERDP_DSP_CONTEXT* context,
-	const BYTE* src, int size, int channels, int block_size)
+static BOOL freerdp_dsp_encode_ms_adpcm(FREERDP_DSP_CONTEXT* context, const BYTE* src, size_t size,
+                                        wStream* out)
 {
 	BYTE* dst;
 	INT32 sample;
 	UINT32 out_size;
-
 	out_size = size / 2;
 
-	if (out_size > context->adpcm_maxlength)
-	{
-		BYTE *newBuffer = realloc(context->adpcm_buffer, out_size + 1024);
-		if (!newBuffer)
-			return FALSE;
+	if (!Stream_EnsureRemainingCapacity(out, out_size))
+		return FALSE;
 
-		context->adpcm_maxlength = out_size + 1024;
-		context->adpcm_buffer = newBuffer;
-	}
-
-	dst = context->adpcm_buffer;
+	dst = Stream_Buffer(out);
 
 	if (context->adpcm.ms.delta[0] < 16)
 		context->adpcm.ms.delta[0] = 16;
@@ -622,24 +605,24 @@ static BOOL freerdp_dsp_encode_ms_adpcm(FREERDP_DSP_CONTEXT* context,
 
 	while (size > 0)
 	{
-		if ((dst - context->adpcm_buffer) % block_size == 0)
+		if ((dst - Stream_Buffer(out)) % context->format.nBlockAlign == 0)
 		{
-			if (channels > 1)
+			if (context->format.nChannels > 1)
 			{
 				*dst++ = context->adpcm.ms.predictor[0];
 				*dst++ = context->adpcm.ms.predictor[1];
-				*dst++ = (BYTE) (context->adpcm.ms.delta[0] & 0xFF);
-				*dst++ = (BYTE) ((context->adpcm.ms.delta[0] >> 8) & 0xFF);
-				*dst++ = (BYTE) (context->adpcm.ms.delta[1] & 0xFF);
-				*dst++ = (BYTE) ((context->adpcm.ms.delta[1] >> 8) & 0xFF);
-				context->adpcm.ms.sample1[0] = *((INT16*) (src + 4));
-				context->adpcm.ms.sample1[1] = *((INT16*) (src + 6));
-				context->adpcm.ms.sample2[0] = *((INT16*) (src + 0));
-				context->adpcm.ms.sample2[1] = *((INT16*) (src + 2));
-				*((INT16*) (dst + 0)) = (INT16) context->adpcm.ms.sample1[0];
-				*((INT16*) (dst + 2)) = (INT16) context->adpcm.ms.sample1[1];
-				*((INT16*) (dst + 4)) = (INT16) context->adpcm.ms.sample2[0];
-				*((INT16*) (dst + 6)) = (INT16) context->adpcm.ms.sample2[1];
+				*dst++ = (BYTE)(context->adpcm.ms.delta[0] & 0xFF);
+				*dst++ = (BYTE)((context->adpcm.ms.delta[0] >> 8) & 0xFF);
+				*dst++ = (BYTE)(context->adpcm.ms.delta[1] & 0xFF);
+				*dst++ = (BYTE)((context->adpcm.ms.delta[1] >> 8) & 0xFF);
+				context->adpcm.ms.sample1[0] = *((INT16*)(src + 4));
+				context->adpcm.ms.sample1[1] = *((INT16*)(src + 6));
+				context->adpcm.ms.sample2[0] = *((INT16*)(src + 0));
+				context->adpcm.ms.sample2[1] = *((INT16*)(src + 2));
+				*((INT16*)(dst + 0)) = (INT16) context->adpcm.ms.sample1[0];
+				*((INT16*)(dst + 2)) = (INT16) context->adpcm.ms.sample1[1];
+				*((INT16*)(dst + 4)) = (INT16) context->adpcm.ms.sample2[0];
+				*((INT16*)(dst + 6)) = (INT16) context->adpcm.ms.sample2[1];
 				dst += 8;
 				src += 8;
 				size -= 8;
@@ -647,12 +630,12 @@ static BOOL freerdp_dsp_encode_ms_adpcm(FREERDP_DSP_CONTEXT* context,
 			else
 			{
 				*dst++ = context->adpcm.ms.predictor[0];
-				*dst++ = (BYTE) (context->adpcm.ms.delta[0] & 0xFF);
-				*dst++ = (BYTE) ((context->adpcm.ms.delta[0] >> 8) & 0xFF);
-				context->adpcm.ms.sample1[0] = *((INT16*) (src + 2));
-				context->adpcm.ms.sample2[0] = *((INT16*) (src + 0));
-				*((INT16*) (dst + 0)) = (INT16) context->adpcm.ms.sample1[0];
-				*((INT16*) (dst + 2)) = (INT16) context->adpcm.ms.sample2[0];
+				*dst++ = (BYTE)(context->adpcm.ms.delta[0] & 0xFF);
+				*dst++ = (BYTE)((context->adpcm.ms.delta[0] >> 8) & 0xFF);
+				context->adpcm.ms.sample1[0] = *((INT16*)(src + 2));
+				context->adpcm.ms.sample2[0] = *((INT16*)(src + 0));
+				*((INT16*)(dst + 0)) = (INT16) context->adpcm.ms.sample1[0];
+				*((INT16*)(dst + 2)) = (INT16) context->adpcm.ms.sample2[0];
 				dst += 4;
 				src += 4;
 				size -= 4;
@@ -664,38 +647,143 @@ static BOOL freerdp_dsp_encode_ms_adpcm(FREERDP_DSP_CONTEXT* context,
 		*dst = freerdp_dsp_encode_ms_adpcm_sample(&context->adpcm, sample, 0) << 4;
 		sample = *((INT16*) src);
 		src += 2;
-		*dst += freerdp_dsp_encode_ms_adpcm_sample(&context->adpcm, sample, channels > 1 ? 1 : 0);
+		*dst += freerdp_dsp_encode_ms_adpcm_sample(&context->adpcm, sample,
+		        context->format.nChannels > 1 ? 1 : 0);
 		dst++;
 		size -= 4;
 	}
-	
-	context->adpcm_size = dst - context->adpcm_buffer;
+
+	Stream_SetPointer(out, dst);
 	return TRUE;
 }
 
-FREERDP_DSP_CONTEXT* freerdp_dsp_context_new(void)
+#if 0
+
+const BYTE* src;
+size_t srcSize;
+const size_t nrFrames = length / srcFormat->wBitsPerSample / 8 / srcFormat->nChannels;
+
+if (!freerdp_dsp_resample(context, data, srcFormat->wBitsPerSample / 8,
+                          srcFormat->nChannels, srcFormat->nSamplesPerSec, nrFrames,
+                          context->format.nChannels, context->format.nSamplesPerSec))
+	return ERROR_INTERNAL_ERROR;
+
+srcSize = Stream_Length(context->resample);
+src = Stream_Buffer(context->resample);
+
+switch (context->format.wFormatTag)
 {
-	FREERDP_DSP_CONTEXT* context;
+case WAVE_FORMAT_PCM:
+	if (!Stream_EnsureRemainingCapacity(out, srcSize))
+		return CHANNEL_RC_NO_MEMORY;
 
-	context = (FREERDP_DSP_CONTEXT*) calloc(1, sizeof(FREERDP_DSP_CONTEXT));
-	if (!context)
-		return NULL;
+	Stream_Write(out, src, srcSize);
+	break;
 
-	context->resample = freerdp_dsp_resample;
-	context->decode_ima_adpcm = freerdp_dsp_decode_ima_adpcm;
-	context->encode_ima_adpcm = freerdp_dsp_encode_ima_adpcm;
-	context->decode_ms_adpcm = freerdp_dsp_decode_ms_adpcm;
-	context->encode_ms_adpcm = freerdp_dsp_encode_ms_adpcm;
+case WAVE_FORMAT_ADPCM:
+	if (!freerdp_dsp_encode_ms_adpcm(context,
+	                                 src, srcSize, out))
+		return ERROR_INTERNAL_ERROR;
 
-	return context;
+	break;
+
+case WAVE_FORMAT_DVI_ADPCM:
+	if (!freerdp_dsp_encode_ima_adpcm(context, src, srcSize, out))
+		return ERROR_INTERNAL_ERROR;
+
+	break;
+#if defined(WITH_GSM)
+
+case WAVE_FORMAT_GSM610:
+	{
+		const BYTE* src = src;
+		INT64 remaining = srcSize;
+
+		while (remaining > 0)
+		{
+			const size_t dstStep = 160 * sizeof(gsm_byte);
+			const size_t srcStep = 160 * sizeof(gsm_signal);
+			gsm_byte* dst;
+
+			if (!Stream_EnsureRemainingCapacity(out, dstStep))
+				return ERROR_OUTOFMEMORY;
+
+			dst = Stream_Pointer(out);
+			gsm_encode(context->gsm, (gsm_signal*)src, dst);
+
+			if (remaining < srcStep)
+				Stream_Seek(out, remaining / sizeof(gsm_signal));
+			else
+				Stream_Seek(out, dstStep);
+
+			remaining -= srcStep;
+			src += srcStep;
+		}
+	}
+	break;
+#endif
+
+default:
+	return ERROR_INTERNAL_ERROR;
+}
+
+return FALSE;
+}
+#endif
+
+FREERDP_DSP_CONTEXT* freerdp_dsp_context_new(BOOL encoder)
+{
+#if defined(WITH_FFMPEG)
+	return freerdp_dsp_ffmpeg_context_new(encoder);
+#else
+	return FALSE;
+#endif
 }
 
 void freerdp_dsp_context_free(FREERDP_DSP_CONTEXT* context)
 {
-	if (context)
-	{
-		free(context->resampled_buffer);
-		free(context->adpcm_buffer);
-		free(context);
-	}
+#if defined(WITH_FFMPEG)
+	return freerdp_dsp_ffmpeg_context_free(context);
+#else
+	return FALSE;
+#endif
+}
+
+BOOL freerdp_dsp_encode(FREERDP_DSP_CONTEXT* context, const AUDIO_FORMAT* srcFormat,
+                        const BYTE* data, size_t length, wStream* out)
+{
+#if defined(WITH_FFMPEG)
+	return freerdp_dsp_ffmpeg_encode(context, srcFormat, data, length, out);
+#else
+	return FALSE;
+#endif
+}
+
+BOOL freerdp_dsp_decode(FREERDP_DSP_CONTEXT* context, const AUDIO_FORMAT* srcFormat,
+                        const BYTE* data, size_t length, wStream* out)
+{
+#if defined(WITH_FFMPEG)
+	return freerdp_dsp_ffmpeg_decode(context, srcFormat, data, length, out);
+#else
+	return FALSE;
+#endif
+}
+
+BOOL freerdp_dsp_supports_format(const AUDIO_FORMAT* format, BOOL encode)
+{
+#if defined(WITH_FFMPEG)
+	return freerdp_dsp_ffmpeg_supports_format(format, encode);
+#else
+	return FALSE;
+#endif
+}
+
+
+BOOL freerdp_dsp_context_reset(FREERDP_DSP_CONTEXT* context, const AUDIO_FORMAT* targetFormat)
+{
+#if defined(WITH_FFMPEG)
+	return freerdp_dsp_ffmpeg_context_reset(context, targetFormat);
+#else
+	return FALSE;
+#endif
 }
