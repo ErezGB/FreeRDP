@@ -298,8 +298,7 @@ static void audin_pulse_stream_request_callback(pa_stream* stream, size_t length
 	AudinPulseDevice* pulse = (AudinPulseDevice*) userdata;
 	UINT error = CHANNEL_RC_OK;
 	pa_stream_peek(stream, &data, &length);
-	error = pulse->receive(&pulse->format, pulse->frames_per_packet,
-	                       data, length, pulse->user_data);
+	error = pulse->receive(&pulse->format, data, length, pulse->user_data);
 	pa_stream_drop(stream);
 
 	if (error && pulse->rdpcontext)

@@ -173,7 +173,7 @@ static DWORD audin_alsa_thread_func(LPVOID arg)
 			break;
 		}
 
-		error = alsa->receive(&alsa->aformat, alsa->frames_per_packet,
+		error = alsa->receive(&alsa->aformat,
 		                      buffer, error, alsa->user_data);
 
 		if (error)

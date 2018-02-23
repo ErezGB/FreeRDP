@@ -30,7 +30,7 @@
  * Subsystem Interface
  */
 
-typedef UINT(*AudinReceive)(const AUDIO_FORMAT* format, UINT32 nrFrames,
+typedef UINT(*AudinReceive)(const AUDIO_FORMAT* format,
                             const BYTE* data, size_t size, void* userData);
 
 typedef struct _IAudinDevice IAudinDevice;

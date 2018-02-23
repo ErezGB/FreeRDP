@@ -270,8 +270,7 @@ static void* audin_oss_thread_func(void* arg)
 		if (tmp < buffer_size) /* Not enouth data. */
 			continue;
 
-		if ((error = oss->receive(&oss->format, oss->FramesPerPacket,
-		                          buffer, buffer_size, oss->user_data)))
+		if ((error = oss->receive(&oss->format, buffer, buffer_size, oss->user_data)))
 		{
 			WLog_ERR(TAG, "oss->receive failed with error %"PRIu32"", error);
 			break;

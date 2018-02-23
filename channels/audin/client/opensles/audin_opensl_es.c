@@ -119,7 +119,6 @@ static void* audin_opensles_thread_func(void* arg)
 		}
 
 		error = opensles->receive(&opensles->format,
-		                          opensles->frames_per_packet,
 		                          buffer.v, raw_size, opensles->user_data);
 
 		if (error)
