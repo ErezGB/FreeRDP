@@ -391,7 +391,7 @@ static UINT audin_receive_wave_data(const AUDIO_FORMAT* format,
 
 static BOOL audin_open_device(AUDIN_PLUGIN* audin, AUDIN_CHANNEL_CALLBACK* callback)
 {
-	UINT error;
+	UINT error = ERROR_INTERNAL_ERROR;
 	BOOL supported;
 	AUDIO_FORMAT format;
 
