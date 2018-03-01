@@ -162,6 +162,10 @@ if (WITH_FFMPEG)
 		codec/dsp_ffmpeg.h)
 endif (WITH_FFMPEG)
 
+if(GSM_FOUND)
+	freerdp_library_add(${GSM_LIBRARIES})
+endif()
+
 if(WITH_NEON)
 	set_source_files_properties(${CODEC_NEON_SRCS} PROPERTIES COMPILE_FLAGS "-mfpu=neon -Wno-unused-variable" )
 	set(CODEC_SRCS ${CODEC_SRCS} ${CODEC_NEON_SRCS})
@@ -331,6 +335,7 @@ endif()
 
 
 target_link_libraries(${MODULE_NAME} ${PRIVATE_KEYWORD} ${LIBFREERDP_LIBS} winpr)
+
 install(TARGETS ${MODULE_NAME} DESTINATION ${CMAKE_INSTALL_LIBDIR} COMPONENT libraries EXPORT FreeRDPTargets)
 if (WITH_DEBUG_SYMBOLS AND MSVC AND BUILD_SHARED_LIBS)
     get_target_property(OUTPUT_FILENAME ${MODULE_NAME} OUTPUT_NAME)

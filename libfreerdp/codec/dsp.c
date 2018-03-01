@@ -57,13 +57,15 @@ typedef union _ADPCM ADPCM;
 
 struct _FREERDP_DSP_CONTEXT
 {
+	BOOL encoder;
+
 	ADPCM adpcm;
 	AUDIO_FORMAT format;
 
 	wStream* buffer;
 	wStream* resample;
 
-#ifdef WITH_GSM
+#if defined(WITH_GSM)
 	gsm gsm;
 #endif
 };
@@ -182,20 +184,21 @@ static UINT16 dsp_decode_ima_adpcm_sample(ADPCM* adpcm,
 }
 
 static BOOL freerdp_dsp_decode_ima_adpcm(FREERDP_DSP_CONTEXT* context,
-        const BYTE* src, int size, int channels, int block_size)
+        const BYTE* src, size_t size, wStream* out)
 {
 	BYTE* dst;
 	BYTE sample;
 	UINT16 decoded;
-	UINT32 out_size;
-	int channel;
+	UINT32 out_size = size * 4;
+	UINT32 channel;
+	const UINT32 block_size = context->format.nBlockAlign;
+	const UINT32 channels = context->format.nChannels;
 	int i;
-	out_size = size * 4;
 
-	if (!Stream_EnsureCapacity(context->buffer, out_size))
+	if (!Stream_EnsureCapacity(out, out_size))
 		return FALSE;
 
-	dst = Stream_Buffer(context->buffer);
+	dst = Stream_Buffer(out);
 
 	while (size > 0)
 	{
@@ -251,7 +254,7 @@ static BOOL freerdp_dsp_decode_ima_adpcm(FREERDP_DSP_CONTEXT* context,
 		}
 	}
 
-	Stream_SetPointer(context->buffer, dst);
+	Stream_SetPointer(out, dst);
 	return TRUE;
 }
 
@@ -461,17 +464,18 @@ static INLINE INT16 freerdp_dsp_decode_ms_adpcm_sample(ADPCM* adpcm, BYTE sample
 }
 
 static BOOL freerdp_dsp_decode_ms_adpcm(FREERDP_DSP_CONTEXT* context,
-                                        const BYTE* src, int size, int channels, int block_size)
+                                        const BYTE* src, size_t size, wStream* out)
 {
 	BYTE* dst;
 	BYTE sample;
-	UINT32 out_size;
-	out_size = size * 4;
+	const UINT32 out_size = size * 4;
+	const UINT32 channels = context->format.nChannels;
+	const UINT32 block_size = context->format.nBlockAlign;
 
-	if (!Stream_EnsureCapacity(context->buffer, out_size))
+	if (!Stream_EnsureCapacity(out, out_size))
 		return FALSE;
 
-	dst = Stream_Buffer(context->buffer);
+	dst = Stream_Buffer(out);
 
 	while (size > 0)
 	{
@@ -546,7 +550,7 @@ static BOOL freerdp_dsp_decode_ms_adpcm(FREERDP_DSP_CONTEXT* context,
 		}
 	}
 
-	Stream_SetPointer(context->buffer, dst);
+	Stream_SetPointer(out, dst);
 	return TRUE;
 }
 
@@ -657,86 +661,28 @@ static BOOL freerdp_dsp_encode_ms_adpcm(FREERDP_DSP_CONTEXT* context, const BYTE
 	return TRUE;
 }
 
-#if 0
-
-const BYTE* src;
-size_t srcSize;
-const size_t nrFrames = length / srcFormat->wBitsPerSample / 8 / srcFormat->nChannels;
-
-if (!freerdp_dsp_resample(context, data, srcFormat->wBitsPerSample / 8,
-                          srcFormat->nChannels, srcFormat->nSamplesPerSec, nrFrames,
-                          context->format.nChannels, context->format.nSamplesPerSec))
-	return ERROR_INTERNAL_ERROR;
-
-srcSize = Stream_Length(context->resample);
-src = Stream_Buffer(context->resample);
-
-switch (context->format.wFormatTag)
-{
-case WAVE_FORMAT_PCM:
-	if (!Stream_EnsureRemainingCapacity(out, srcSize))
-		return CHANNEL_RC_NO_MEMORY;
-
-	Stream_Write(out, src, srcSize);
-	break;
-
-case WAVE_FORMAT_ADPCM:
-	if (!freerdp_dsp_encode_ms_adpcm(context,
-	                                 src, srcSize, out))
-		return ERROR_INTERNAL_ERROR;
-
-	break;
-
-case WAVE_FORMAT_DVI_ADPCM:
-	if (!freerdp_dsp_encode_ima_adpcm(context, src, srcSize, out))
-		return ERROR_INTERNAL_ERROR;
-
-	break;
-#if defined(WITH_GSM)
-
-case WAVE_FORMAT_GSM610:
-	{
-		const BYTE* src = src;
-		INT64 remaining = srcSize;
-
-		while (remaining > 0)
-		{
-			const size_t dstStep = 160 * sizeof(gsm_byte);
-			const size_t srcStep = 160 * sizeof(gsm_signal);
-			gsm_byte* dst;
-
-			if (!Stream_EnsureRemainingCapacity(out, dstStep))
-				return ERROR_OUTOFMEMORY;
-
-			dst = Stream_Pointer(out);
-			gsm_encode(context->gsm, (gsm_signal*)src, dst);
-
-			if (remaining < srcStep)
-				Stream_Seek(out, remaining / sizeof(gsm_signal));
-			else
-				Stream_Seek(out, dstStep);
-
-			remaining -= srcStep;
-			src += srcStep;
-		}
-	}
-	break;
-#endif
-
-default:
-	return ERROR_INTERNAL_ERROR;
-}
-
-return FALSE;
-}
-#endif
-
 FREERDP_DSP_CONTEXT* freerdp_dsp_context_new(BOOL encoder)
 {
 #if defined(WITH_FFMPEG)
 	return freerdp_dsp_ffmpeg_context_new(encoder);
 #else
-	return FALSE;
+	FREERDP_DSP_CONTEXT* context = calloc(1, sizeof(FREERDP_DSP_CONTEXT));
+
+	if (!context)
+		return NULL;
+
+	context->encoder = encoder;
+#if defined(WITH_GSM)
+	context->gsm = gsm_create();
+
+	if (!context->gsm)
+	{
+		free(context);
+		return NULL;
+	}
+
+#endif
+	return context;
 #endif
 }
 
@@ -745,7 +691,15 @@ void freerdp_dsp_context_free(FREERDP_DSP_CONTEXT* context)
 #if defined(WITH_FFMPEG)
 	freerdp_dsp_ffmpeg_context_free(context);
 #else
-	return;
+
+	if (context)
+	{
+#if defined(WITH_GSM)
+		gsm_destroy(context->gsm);
+#endif
+		free(context);
+	}
+
 #endif
 }
 
@@ -755,6 +709,52 @@ BOOL freerdp_dsp_encode(FREERDP_DSP_CONTEXT* context, const AUDIO_FORMAT* srcFor
 #if defined(WITH_FFMPEG)
 	return freerdp_dsp_ffmpeg_encode(context, srcFormat, data, length, out);
 #else
+
+	if (!context || !context->encoder || !srcFormat || !data || !out)
+		return FALSE;
+
+	// TODO: Resample
+
+	switch (context->format.wFormatTag)
+	{
+		case WAVE_FORMAT_PCM:
+			if (!Stream_EnsureRemainingCapacity(out, length))
+				return FALSE;
+
+			Stream_Write(out, data, length);
+			return TRUE;
+
+		case WAVE_FORMAT_ADPCM:
+			return freerdp_dsp_encode_ms_adpcm(context, data, length, out);
+
+		case WAVE_FORMAT_DVI_ADPCM:
+			return freerdp_dsp_encode_ima_adpcm(context, data, length, out);
+#if defined(WITH_GSM)
+
+		case WAVE_FORMAT_GSM610:
+			{
+				size_t offset = 0;
+
+				while (offset < length)
+				{
+					gsm_signal* signal = (gsm_signal*)&data[offset];
+
+					if (!Stream_EnsureRemainingCapacity(out, sizeof(gsm_frame)))
+						return FALSE;
+
+					gsm_encode(context->gsm, signal, Stream_Buffer(out));
+					Stream_Seek(out, sizeof(gsm_frame));
+				}
+
+				return TRUE;
+			}
+
+#endif
+
+		default:
+			return FALSE;
+	}
+
 	return FALSE;
 #endif
 }
@@ -765,6 +765,51 @@ BOOL freerdp_dsp_decode(FREERDP_DSP_CONTEXT* context, const AUDIO_FORMAT* srcFor
 #if defined(WITH_FFMPEG)
 	return freerdp_dsp_ffmpeg_decode(context, srcFormat, data, length, out);
 #else
+
+	if (!context || context->encoder || !srcFormat || !data || !out)
+		return FALSE;
+
+	switch (context->format.wFormatTag)
+	{
+		case WAVE_FORMAT_PCM:
+			if (!Stream_EnsureRemainingCapacity(out, length))
+				return FALSE;
+
+			Stream_Write(out, data, length);
+			return TRUE;
+
+		case WAVE_FORMAT_ADPCM:
+			return freerdp_dsp_decode_ms_adpcm(context, data, length, out);
+
+		case WAVE_FORMAT_DVI_ADPCM:
+			return freerdp_dsp_decode_ima_adpcm(context, data, length, out);
+#if defined(WITH_GSM)
+
+		case WAVE_FORMAT_GSM610:
+			{
+				size_t offset = 0;
+
+				while (offset < length)
+				{
+					gsm_signal gsmBlockBuffer[160] = { 0 };
+					gsm_decode(context->gsm, (gsm_byte*) &data[offset], gsmBlockBuffer);
+					offset += 33;
+
+					if (!Stream_EnsureRemainingCapacity(out, sizeof(gsmBlockBuffer)))
+						return FALSE;
+
+					Stream_Write(out, (void*) gsmBlockBuffer, sizeof(gsmBlockBuffer));
+				}
+
+				return TRUE;
+			}
+
+#endif
+
+		default:
+			return FALSE;
+	}
+
 	return FALSE;
 #endif
 }
@@ -774,6 +819,23 @@ BOOL freerdp_dsp_supports_format(const AUDIO_FORMAT* format, BOOL encode)
 #if defined(WITH_FFMPEG)
 	return freerdp_dsp_ffmpeg_supports_format(format, encode);
 #else
+
+	switch (format->wFormatTag)
+	{
+		case WAVE_FORMAT_PCM:
+		case WAVE_FORMAT_ADPCM:
+		case WAVE_FORMAT_DVI_ADPCM:
+			return TRUE;
+#if defined(WITH_GSM)
+
+		case WAVE_FORMAT_GSM610:
+			return !encode;
+#endif
+
+		default:
+			return FALSE;
+	}
+
 	return FALSE;
 #endif
 }
@@ -784,6 +846,11 @@ BOOL freerdp_dsp_context_reset(FREERDP_DSP_CONTEXT* context, const AUDIO_FORMAT*
 #if defined(WITH_FFMPEG)
 	return freerdp_dsp_ffmpeg_context_reset(context, targetFormat);
 #else
-	return FALSE;
+
+	if (!context || !targetFormat)
+		return FALSE;
+
+	context->format = *targetFormat;
+	return TRUE;
 #endif
 }
