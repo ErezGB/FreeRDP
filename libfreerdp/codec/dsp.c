@@ -743,9 +743,9 @@ FREERDP_DSP_CONTEXT* freerdp_dsp_context_new(BOOL encoder)
 void freerdp_dsp_context_free(FREERDP_DSP_CONTEXT* context)
 {
 #if defined(WITH_FFMPEG)
-	return freerdp_dsp_ffmpeg_context_free(context);
+	freerdp_dsp_ffmpeg_context_free(context);
 #else
-	return FALSE;
+	return;
 #endif
 }
 
