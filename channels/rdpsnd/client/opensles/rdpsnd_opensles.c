@@ -47,7 +47,7 @@ struct rdpsnd_opensles_plugin
 {
 	rdpsndDevicePlugin device;
 
-	int latency;
+	UINT32 latency;
 	int wformat;
 	int block_size;
 	char* device_name;
@@ -115,11 +115,11 @@ static int rdpsnd_opensles_set_params(rdpsndopenslesPlugin* opensles)
 }
 
 static BOOL rdpsnd_opensles_set_format(rdpsndDevicePlugin* device,
-                                       const AUDIO_FORMAT* format, int latency)
+                                       const AUDIO_FORMAT* format, UINT32 latency)
 {
 	rdpsndopenslesPlugin* opensles = (rdpsndopenslesPlugin*) device;
 	rdpsnd_opensles_check_handle(opensles);
-	DEBUG_SND("opensles=%p format=%p, latency=%d", (void*) opensles, (void*) format, latency);
+	DEBUG_SND("opensles=%p format=%p, latency=%"PRIu32, (void*) opensles, (void*) format, latency);
 
 	if (format)
 	{
@@ -138,10 +138,10 @@ static BOOL rdpsnd_opensles_set_format(rdpsndDevicePlugin* device,
 }
 
 static BOOL rdpsnd_opensles_open(rdpsndDevicePlugin* device,
-                                 const AUDIO_FORMAT* format, int latency)
+                                 const AUDIO_FORMAT* format, UINT32 latency)
 {
 	rdpsndopenslesPlugin* opensles = (rdpsndopenslesPlugin*) device;
-	DEBUG_SND("opensles=%p format=%p, latency=%d, rate=%"PRIu32"",
+	DEBUG_SND("opensles=%p format=%p, latency=%"PRIu32", rate=%"PRIu32"",
 	          (void*) opensles, (void*) format, latency, opensles->rate);
 
 	if (rdpsnd_opensles_check_handle(opensles))
@@ -156,8 +156,7 @@ static BOOL rdpsnd_opensles_open(rdpsndDevicePlugin* device,
 	else
 		rdpsnd_opensles_set_volume(device, opensles->volume);
 
-	rdpsnd_opensles_set_format(device, format, latency);
-	return TRUE;
+	return rdpsnd_opensles_set_format(device, format, latency);
 }
 
 static void rdpsnd_opensles_close(rdpsndDevicePlugin* device)
@@ -371,7 +370,6 @@ UINT freerdp_rdpsnd_client_subsystem_entry(
 
 	opensles->device.Open = rdpsnd_opensles_open;
 	opensles->device.FormatSupported = rdpsnd_opensles_format_supported;
-	opensles->device.SetFormat = rdpsnd_opensles_set_format;
 	opensles->device.GetVolume = rdpsnd_opensles_get_volume;
 	opensles->device.SetVolume = rdpsnd_opensles_set_volume;
 	opensles->device.Start = rdpsnd_opensles_start;
