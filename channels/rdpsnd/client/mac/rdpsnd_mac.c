@@ -272,7 +272,7 @@ static void rdpsnd_mac_play(rdpsndDevicePlugin* device, const BYTE* data, size_t
 
 	CopyMemory(audioBuffer->mAudioData, data, length);
 	audioBuffer->mAudioDataByteSize = length;
-	audioBuffer->mUserData = wave;
+	audioBuffer->mUserData = mac;
 
 	AudioQueueEnqueueBufferWithParameters(mac->audioQueue, audioBuffer, 0, 0, 0, 0, 0, NULL, NULL, &outActualStartTime);
 
