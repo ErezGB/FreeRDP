@@ -164,6 +164,12 @@ endif (WITH_FFMPEG)
 
 if(GSM_FOUND)
 	freerdp_library_add(${GSM_LIBRARIES})
+	include_directories(${GSM_INCLUDE_DIR})
+endif()
+
+if(LAME_FOUND)
+	freerdp_library_add(${LAME_LIBRARIES})
+	include_directories(${LAME_INCLUDE_DIR})
 endif()
 
 if(WITH_NEON)
