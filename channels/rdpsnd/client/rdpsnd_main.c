@@ -49,25 +49,6 @@
 
 #include "rdpsnd_main.h"
 
-struct _RDPSND_WAVE
-{
-	BYTE* data;
-	size_t length;
-
-	BYTE cBlockNo;
-	UINT16 wFormatNo;
-	UINT16 wTimeStampA;
-	UINT16 wTimeStampB;
-
-	UINT16 wAudioLength;
-
-	UINT32 wLocalTimeA;
-	UINT32 wLocalTimeB;
-
-	BOOL AutoConfirm;
-};
-typedef struct _RDPSND_WAVE RDPSND_WAVE;
-
 struct rdpsnd_plugin
 {
 	CHANNEL_DEF channelDef;
@@ -99,6 +80,7 @@ struct rdpsnd_plugin
 	BYTE waveData[4];
 	UINT16 waveDataSize;
 	UINT32 wTimeStamp;
+	UINT32 wArrivalTime;
 
 	UINT32 latency;
 	BOOL isOpen;
@@ -122,7 +104,6 @@ struct rdpsnd_plugin
  *
  * @return 0 on success, otherwise a Win32 error code
  */
-static UINT rdpsnd_confirm_wave(rdpsndPlugin* rdpsnd, const RDPSND_WAVE* wave);
 static UINT rdpsnd_virtual_channel_write(rdpsndPlugin* rdpsnd, wStream* s);
 
 /**
@@ -413,6 +394,7 @@ static UINT rdpsnd_recv_wave_info_pdu(rdpsndPlugin* rdpsnd, wStream* s,
 	if (Stream_GetRemainingLength(s) < 12)
 		return ERROR_BAD_LENGTH;
 
+	rdpsnd->wArrivalTime = GetTickCount();
 	Stream_Read_UINT16(s, rdpsnd->wTimeStamp);
 	Stream_Read_UINT16(s, wFormatNo);
 
@@ -496,26 +478,14 @@ static UINT rdpsnd_send_wave_confirm_pdu(rdpsndPlugin* rdpsnd,
  *
  * @return 0 on success, otherwise a Win32 error code
  */
-static UINT rdpsnd_confirm_wave(rdpsndPlugin* rdpsnd, const RDPSND_WAVE* wave)
-{
-	WLog_Print(rdpsnd->log, WLOG_DEBUG,
-	           "WaveConfirm: cBlockNo: %"PRIu8" wTimeStamp: %"PRIu16" wTimeDiff: %d",
-	           wave->cBlockNo, wave->wTimeStampB, wave->wTimeStampB - wave->wTimeStampA);
-	return rdpsnd_send_wave_confirm_pdu(rdpsnd, wave->wTimeStampB, wave->cBlockNo);
-}
-
-/**
- * Function description
- *
- * @return 0 on success, otherwise a Win32 error code
- */
 static UINT rdpsnd_recv_wave_pdu(rdpsndPlugin* rdpsnd, wStream* s)
 {
 	size_t size;
 	BYTE* data;
 	AUDIO_FORMAT* format;
 	UINT status;
-	RDPSND_WAVE wave;
+	DWORD end;
+	DWORD diffMS;
 	rdpsnd->expectingWave = FALSE;
 	/**
 	 * The Wave PDU is a special case: it is always sent after a Wave Info PDU,
@@ -527,16 +497,8 @@ static UINT rdpsnd_recv_wave_pdu(rdpsndPlugin* rdpsnd, wStream* s)
 	data = Stream_Buffer(s);
 	size = Stream_Length(s);
 	format = &rdpsnd->ClientFormats[rdpsnd->wCurrentFormatNo];
-	wave.wLocalTimeA = GetTickCount();
-	wave.wTimeStampA = rdpsnd->wTimeStamp;
-	wave.wFormatNo = rdpsnd->wCurrentFormatNo;
-	wave.cBlockNo = rdpsnd->cBlockNo;
-	wave.data = data;
-	wave.length = size;
-	wave.AutoConfirm = TRUE;
-	wave.wAudioLength = rdpsnd_compute_audio_time_length(format, size);
 	WLog_Print(rdpsnd->log, WLOG_DEBUG, "Wave: cBlockNo: %"PRIu8" wTimeStamp: %"PRIu16"",
-	           wave.cBlockNo, wave.wTimeStampA);
+	           rdpsnd->cBlockNo, rdpsnd->wTimeStamp);
 
 	if (rdpsnd->device)
 	{
@@ -560,13 +522,9 @@ static UINT rdpsnd_recv_wave_pdu(rdpsndPlugin* rdpsnd, wStream* s)
 			return CHANNEL_RC_NULL_DATA;
 	}
 
-	wave.wLocalTimeB = GetTickCount();
-	wave.wTimeStampB = rdpsnd->wTimeStamp + wave.wAudioLength;
-
-	if (wave.AutoConfirm)
-		status = rdpsnd_confirm_wave(rdpsnd, &wave);
-
-	return status;
+	end = GetTickCount();
+	diffMS = end - rdpsnd->wArrivalTime;
+	return rdpsnd_send_wave_confirm_pdu(rdpsnd, rdpsnd->wTimeStamp + diffMS, rdpsnd->cBlockNo);
 }
 
 static void rdpsnd_recv_close_pdu(rdpsndPlugin* rdpsnd)
