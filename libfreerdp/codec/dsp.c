@@ -480,7 +480,7 @@ static BOOL freerdp_dsp_decode_faad(FREERDP_DSP_CONTEXT* context,
 		if (info.samples == 0)
 			continue;
 
-		Stream_Seek(out, info.samples * info.channels * context->format.wBitsPerSample / 8);
+		Stream_Seek(out, info.samples * context->format.wBitsPerSample / 8);
 	}
 
 	return TRUE;
