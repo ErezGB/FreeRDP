@@ -380,6 +380,9 @@ static UINT audin_receive_wave_data(const AUDIO_FORMAT* format,
 	else if (!freerdp_dsp_encode(audin->dsp_context, format, data, size, audin->data))
 		return ERROR_INTERNAL_ERROR;
 
+	if (Stream_GetPosition(audin->data) <= 1)
+		return CHANNEL_RC_OK;
+
 	if ((error = audin_send_incoming_data_pdu((IWTSVirtualChannelCallback*) callback)))
 	{
 		WLog_ERR(TAG, "audin_send_incoming_data_pdu failed!");

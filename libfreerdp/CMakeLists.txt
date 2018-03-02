@@ -164,17 +164,22 @@ endif (WITH_FFMPEG)
 
 if(GSM_FOUND)
 	freerdp_library_add(${GSM_LIBRARIES})
-	include_directories(${GSM_INCLUDE_DIR})
+	include_directories(${GSM_INCLUDE_DIRS})
 endif()
 
 if(LAME_FOUND)
 	freerdp_library_add(${LAME_LIBRARIES})
-	include_directories(${LAME_INCLUDE_DIR})
+	include_directories(${LAME_INCLUDE_DIRS})
 endif()
 
 if(FAAD2_FOUND)
 	freerdp_library_add(${FAAD2_LIBRARIES})
-	include_directories(${FAAD2_INCLUDE_DIR})
+	include_directories(${FAAD2_INCLUDE_DIRS})
+endif()
+
+if(FAAC_FOUND)
+	freerdp_library_add(${FAAC_LIBRARIES})
+	include_directories(${FAAC_INCLUDE_DIRS})
 endif()
 
 if(WITH_NEON)

@@ -54,6 +54,7 @@
 #cmakedefine WITH_GSM
 #cmakedefine WITH_LAME
 #cmakedefine WITH_FAAD2
+#cmakedefine WITH_FAAC
 #cmakedefine WITH_GFX_H264
 #cmakedefine WITH_OPENH264
 #cmakedefine WITH_FFMPEG
