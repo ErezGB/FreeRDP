@@ -486,6 +486,7 @@ static UINT rdpsnd_recv_wave_pdu(rdpsndPlugin* rdpsnd, wStream* s)
 	UINT status;
 	DWORD end;
 	DWORD diffMS;
+	UINT latency = 0;
 	rdpsnd->expectingWave = FALSE;
 	/**
 	 * The Wave PDU is a special case: it is always sent after a Wave Info PDU,
@@ -506,13 +507,13 @@ static UINT rdpsnd_recv_wave_pdu(rdpsndPlugin* rdpsnd, wStream* s)
 
 		if (rdpsnd->device->FormatSupported(rdpsnd->device, format))
 		{
-			IFCALL(rdpsnd->device->Play, rdpsnd->device, data, size);
+			latency = IFCALLRESULT(0, rdpsnd->device->Play, rdpsnd->device, data, size);
 			status = CHANNEL_RC_OK;
 		}
 		else if (freerdp_dsp_decode(rdpsnd->dsp_context, format, data, size, pcmData))
 		{
 			Stream_SealLength(pcmData);
-			IFCALL(rdpsnd->device->Play, rdpsnd->device, Stream_Buffer(pcmData), Stream_Length(pcmData));
+			latency = IFCALLRESULT(0, rdpsnd->device->Play, rdpsnd->device, Stream_Buffer(pcmData), Stream_Length(pcmData));
 			status = CHANNEL_RC_OK;
 		}
 
@@ -523,7 +524,7 @@ static UINT rdpsnd_recv_wave_pdu(rdpsndPlugin* rdpsnd, wStream* s)
 	}
 
 	end = GetTickCount();
-	diffMS = end - rdpsnd->wArrivalTime;
+	diffMS = end - rdpsnd->wArrivalTime + latency;
 	return rdpsnd_send_wave_confirm_pdu(rdpsnd, rdpsnd->wTimeStamp + diffMS, rdpsnd->cBlockNo);
 }
 

@@ -256,7 +256,7 @@ static void rdpsnd_mac_start(rdpsndDevicePlugin* device)
 	}
 }
 
-static void rdpsnd_mac_play(rdpsndDevicePlugin* device, const BYTE* data, size_t size)
+static UINT rdpsnd_mac_play(rdpsndDevicePlugin* device, const BYTE* data, size_t size)
 {
 	size_t length;
 	AudioQueueBufferRef audioBuffer;
@@ -264,7 +264,7 @@ static void rdpsnd_mac_play(rdpsndDevicePlugin* device, const BYTE* data, size_t
 	rdpsndMacPlugin* mac = (rdpsndMacPlugin*) device;
 
 	if (!mac->isOpen)
-		return;
+		return 0;
 
 	audioBuffer = mac->audioBuffers[mac->audioBufferIndex];
 
@@ -281,6 +281,7 @@ static void rdpsnd_mac_play(rdpsndDevicePlugin* device, const BYTE* data, size_t
 	mac->audioBufferIndex %= MAC_AUDIO_QUEUE_NUM_BUFFERS;
 
 	rdpsnd_mac_start(device);
+	return 10; /* TODO: Get real latencry in [ms] */
 }
 
 #ifdef BUILTIN_CHANNELS

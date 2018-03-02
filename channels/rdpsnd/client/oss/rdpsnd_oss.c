@@ -358,12 +358,12 @@ static BOOL rdpsnd_oss_set_volume(rdpsndDevicePlugin* device, UINT32 value)
 	return TRUE;
 }
 
-static void rdpsnd_oss_play(rdpsndDevicePlugin* device, const BYTE* data, size_t size)
+static UINT rdpsnd_oss_play(rdpsndDevicePlugin* device, const BYTE* data, size_t size)
 {
 	rdpsndOssPlugin* oss = (rdpsndOssPlugin*)device;
 
 	if (device == NULL || oss->mixer_handle == -1)
-		return;
+		return 0;
 
 	while (size > 0)
 	{
@@ -384,6 +384,8 @@ static void rdpsnd_oss_play(rdpsndDevicePlugin* device, const BYTE* data, size_t
 		else
 			size = 0;
 	}
+
+	return 10; /* TODO: Get real latency in [ms] */
 }
 
 static COMMAND_LINE_ARGUMENT_A rdpsnd_oss_args[] =

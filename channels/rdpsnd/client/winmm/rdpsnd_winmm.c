@@ -230,19 +230,19 @@ static void rdpsnd_winmm_start(rdpsndDevicePlugin* device)
 	//rdpsndWinmmPlugin* winmm = (rdpsndWinmmPlugin*) device;
 }
 
-static void rdpsnd_winmm_play(rdpsndDevicePlugin* device, const BYTE* data, size_t size)
+static UINT rdpsnd_winmm_play(rdpsndDevicePlugin* device, const BYTE* data, size_t size)
 {
 	MMRESULT mmResult;
 	LPWAVEHDR lpWaveHdr;
 	rdpsndWinmmPlugin* winmm = (rdpsndWinmmPlugin*) device;
 
 	if (!winmm->hWaveOut)
-		return;
+		return 0;
 
 	lpWaveHdr = (LPWAVEHDR) malloc(sizeof(WAVEHDR));
 
 	if (!lpWaveHdr)
-		return;
+		return 0;
 
 	ZeroMemory(lpWaveHdr, sizeof(WAVEHDR));
 	lpWaveHdr->dwFlags = 0;
@@ -256,7 +256,7 @@ static void rdpsnd_winmm_play(rdpsndDevicePlugin* device, const BYTE* data, size
 	if (mmResult != MMSYSERR_NOERROR)
 	{
 		WLog_ERR(TAG,  "waveOutPrepareHeader failure: %"PRIu32"", mmResult);
-		return;
+		return 0;
 	}
 
 	mmResult = waveOutWrite(winmm->hWaveOut, lpWaveHdr, sizeof(WAVEHDR));
@@ -266,10 +266,12 @@ static void rdpsnd_winmm_play(rdpsndDevicePlugin* device, const BYTE* data, size
 		WLog_ERR(TAG,  "waveOutWrite failure: %"PRIu32"", mmResult);
 		waveOutUnprepareHeader(winmm->hWaveOut, lpWaveHdr, sizeof(WAVEHDR));
 		free(lpWaveHdr);
-		return;
+		return 0;
 	}
 
 	WaitForSingleObject(winmm->next, INFINITE);
+
+	return 10; /* TODO: Get real latencry in [ms] */
 }
 
 static void rdpsnd_winmm_parse_addin_args(rdpsndDevicePlugin* device, ADDIN_ARGV* args)

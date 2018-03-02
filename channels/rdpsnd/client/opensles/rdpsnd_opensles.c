@@ -261,7 +261,7 @@ static BOOL rdpsnd_opensles_set_volume(rdpsndDevicePlugin* device,
 	return TRUE;
 }
 
-static void rdpsnd_opensles_play(rdpsndDevicePlugin* device,
+static UINT rdpsnd_opensles_play(rdpsndDevicePlugin* device,
                                  const BYTE* data, size_t size)
 {
 	union
@@ -274,7 +274,7 @@ static void rdpsnd_opensles_play(rdpsndDevicePlugin* device,
 	DEBUG_SND("opensles=%p, data=%p, size=%d", (void*) opensles, (void*) data, size);
 
 	if (!rdpsnd_opensles_check_handle(opensles))
-		return;
+		return 0;
 
 	src.b = data;
 	DEBUG_SND("size=%d, src=%p", size, (void*) src.b);
@@ -285,6 +285,8 @@ static void rdpsnd_opensles_play(rdpsndDevicePlugin* device,
 
 	if (ret < 0)
 		WLog_ERR(TAG, "android_AudioOut failed (%d)", ret);
+
+	return 10; /* TODO: Get real latencry in [ms] */
 }
 
 static void rdpsnd_opensles_start(rdpsndDevicePlugin* device)

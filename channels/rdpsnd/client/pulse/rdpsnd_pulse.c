@@ -49,8 +49,6 @@ struct rdpsnd_pulse_plugin
 	pa_context* context;
 	pa_sample_spec sample_spec;
 	pa_stream* stream;
-	int format;
-	int block_size;
 	UINT32 latency;
 };
 
@@ -235,8 +233,6 @@ static BOOL rdpsnd_pulse_set_format_spec(rdpsndPulsePlugin* pulse, const AUDIO_F
 	}
 
 	pulse->sample_spec = sample_spec;
-	pulse->format = format->wFormatTag;
-	pulse->block_size = format->nBlockAlign;
 	return TRUE;
 }
 
@@ -413,14 +409,16 @@ static BOOL rdpsnd_pulse_set_volume(rdpsndDevicePlugin* device, UINT32 value)
 	return TRUE;
 }
 
-static void rdpsnd_pulse_play(rdpsndDevicePlugin* device, const BYTE* data, size_t size)
+static UINT rdpsnd_pulse_play(rdpsndDevicePlugin* device, const BYTE* data, size_t size)
 {
 	size_t length;
 	int status;
+	pa_usec_t latency;
+	int negative;
 	rdpsndPulsePlugin* pulse = (rdpsndPulsePlugin*) device;
 
 	if (!pulse->stream || !data)
-		return;
+		return 0;
 
 	pa_threaded_mainloop_lock(pulse->mainloop);
 
@@ -446,7 +444,12 @@ static void rdpsnd_pulse_play(rdpsndDevicePlugin* device, const BYTE* data, size
 		size -= length;
 	}
 
+	if (pa_stream_get_latency(pulse->stream, &latency, &negative) != 0)
+		latency = 0;
+
 	pa_threaded_mainloop_unlock(pulse->mainloop);
+
+	return latency / 1000;
 }
 
 static void rdpsnd_pulse_start(rdpsndDevicePlugin* device)

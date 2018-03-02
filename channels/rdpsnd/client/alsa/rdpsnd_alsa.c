@@ -47,19 +47,16 @@ struct rdpsnd_alsa_plugin
 {
 	rdpsndDevicePlugin device;
 
-	int latency;
-	int wformat;
-	int block_size;
+	UINT32 latency;
+	AUDIO_FORMAT aformat;
 	char* device_name;
 	snd_pcm_t* pcm_handle;
 	snd_mixer_t* mixer_handle;
-	UINT32 source_rate;
+
 	UINT32 actual_rate;
-	UINT32 wLocalTimeClose;
 	snd_pcm_format_t format;
-	UINT32 source_channels;
 	UINT32 actual_channels;
-	int bytes_per_channel;
+
 	snd_pcm_uframes_t buffer_size;
 	snd_pcm_uframes_t period_size;
 };
@@ -114,7 +111,7 @@ static int rdpsnd_alsa_set_hw_params(rdpsndAlsaPlugin* alsa)
 	 * It is also possible for the buffer size to not be an integer multiple of the period size.
 	 */
 	int interrupts_per_sec_near = 50;
-	int bytes_per_sec = (alsa->actual_rate * alsa->bytes_per_channel * alsa->actual_channels);
+	int bytes_per_sec = (alsa->actual_rate * alsa->aformat.wBitsPerSample / 8 * alsa->actual_channels);
 	alsa->buffer_size = buffer_size_max;
 	alsa->period_size = (bytes_per_sec / interrupts_per_sec_near);
 
@@ -147,9 +144,9 @@ static int rdpsnd_alsa_set_sw_params(rdpsndAlsaPlugin* alsa)
 	status = snd_pcm_sw_params_current(alsa->pcm_handle, sw_params);
 	SND_PCM_CHECK("snd_pcm_sw_params_current", status);
 	status = snd_pcm_sw_params_set_avail_min(alsa->pcm_handle, sw_params,
-	         (alsa->bytes_per_channel * alsa->actual_channels));
+			 (alsa->aformat.nChannels * alsa->actual_channels));
 	SND_PCM_CHECK("snd_pcm_sw_params_set_avail_min", status);
-	status = snd_pcm_sw_params_set_start_threshold(alsa->pcm_handle, sw_params, alsa->block_size);
+	status = snd_pcm_sw_params_set_start_threshold(alsa->pcm_handle, sw_params, alsa->aformat.nBlockAlign);
 	SND_PCM_CHECK("snd_pcm_sw_params_set_start_threshold", status);
 	status = snd_pcm_sw_params(alsa->pcm_handle, sw_params);
 	SND_PCM_CHECK("snd_pcm_sw_params", status);
@@ -189,9 +186,7 @@ static BOOL rdpsnd_alsa_set_format(rdpsndDevicePlugin* device, const AUDIO_FORMA
 
 	if (format)
 	{
-		alsa->source_rate = format->nSamplesPerSec;
 		alsa->actual_rate = format->nSamplesPerSec;
-		alsa->source_channels = format->nChannels;
 		alsa->actual_channels = format->nChannels;
 
 		switch (format->wFormatTag)
@@ -201,12 +196,10 @@ static BOOL rdpsnd_alsa_set_format(rdpsndDevicePlugin* device, const AUDIO_FORMA
 				{
 					case 8:
 						alsa->format = SND_PCM_FORMAT_S8;
-						alsa->bytes_per_channel = 1;
 						break;
 
 					case 16:
 						alsa->format = SND_PCM_FORMAT_S16_LE;
-						alsa->bytes_per_channel = 2;
 						break;
 
 					default:
@@ -222,9 +215,6 @@ static BOOL rdpsnd_alsa_set_format(rdpsndDevicePlugin* device, const AUDIO_FORMA
 			default:
 				return FALSE;
 		}
-
-		alsa->wformat = format->wFormatTag;
-		alsa->block_size = format->nBlockAlign;
 	}
 
 	alsa->latency = latency;
@@ -313,9 +303,6 @@ static void rdpsnd_alsa_close(rdpsndDevicePlugin* device)
 
 	if (status != 0)
 		frames = 0;
-
-	alsa->wLocalTimeClose = GetTickCount();
-	alsa->wLocalTimeClose += (((frames * 1000) / alsa->actual_rate) / alsa->actual_channels);
 }
 
 static void rdpsnd_alsa_free(rdpsndDevicePlugin* device)
@@ -429,13 +416,13 @@ static BOOL rdpsnd_alsa_set_volume(rdpsndDevicePlugin* device, UINT32 value)
 	return TRUE;
 }
 
-static void rdpsnd_alsa_play(rdpsndDevicePlugin* device, const BYTE* data, size_t size)
+static UINT rdpsnd_alsa_play(rdpsndDevicePlugin* device, const BYTE* data, size_t size)
 {
 	size_t offset;
 	int frame_size;
 	rdpsndAlsaPlugin* alsa = (rdpsndAlsaPlugin*) device;
 	offset = 0;
-	frame_size = alsa->actual_channels * alsa->bytes_per_channel;
+	frame_size = alsa->actual_channels * alsa->aformat.wBitsPerSample / 8;
 
 	while (offset < size)
 	{
@@ -462,6 +449,8 @@ static void rdpsnd_alsa_play(rdpsndDevicePlugin* device, const BYTE* data, size_
 
 		offset += status * frame_size;
 	}
+
+	return 10; /* TODO: Get real latency in [ms] */
 }
 
 static COMMAND_LINE_ARGUMENT_A rdpsnd_alsa_args[] =
@@ -568,12 +557,9 @@ UINT freerdp_rdpsnd_client_subsystem_entry(PFREERDP_RDPSND_DEVICE_ENTRY_POINTS p
 	}
 
 	alsa->pcm_handle = 0;
-	alsa->source_rate = 22050;
 	alsa->actual_rate = 22050;
 	alsa->format = SND_PCM_FORMAT_S16_LE;
-	alsa->source_channels = 2;
 	alsa->actual_channels = 2;
-	alsa->bytes_per_channel = 2;
 	pEntryPoints->pRegisterRdpsndDevice(pEntryPoints->rdpsnd, (rdpsndDevicePlugin*) alsa);
 	return CHANNEL_RC_OK;
 error_strdup:
