@@ -42,6 +42,10 @@
 #include "dsp_ffmpeg.h"
 #endif
 
+#if defined(WITH_FAAD2)
+#include <neaacdec.h>
+#endif
+
 union _ADPCM
 {
 	struct
@@ -75,6 +79,10 @@ struct _FREERDP_DSP_CONTEXT
 #if defined(WITH_LAME)
 	lame_t lame;
 	hip_t hip;
+#endif
+#if defined(WITH_FAAD2)
+	NeAACDecHandle faad;
+	BOOL faadSetup;
 #endif
 };
 
@@ -313,8 +321,8 @@ static BOOL freerdp_dsp_decode_mp3(FREERDP_DSP_CONTEXT* context,
                                    const BYTE* src, size_t size, wStream* out)
 {
 	int rc, x;
-	BYTE* pcm_l;
-	BYTE* pcm_r;
+	short* pcm_l;
+	short* pcm_r;
 	size_t buffer_size;
 
 	if (!context || !src || !out)
@@ -325,9 +333,10 @@ static BOOL freerdp_dsp_decode_mp3(FREERDP_DSP_CONTEXT* context,
 	if (!Stream_EnsureCapacity(context->buffer, 2 * buffer_size))
 		return FALSE;
 
-	pcm_l = Stream_Buffer(context->buffer);
-	pcm_r = Stream_Buffer(context->buffer) + buffer_size;
-	rc = hip_decode(context->hip, src, size, pcm_l, pcm_r);
+	pcm_l = (short*)Stream_Buffer(context->buffer);
+	pcm_r = (short*)Stream_Buffer(context->buffer) + buffer_size;
+	rc = hip_decode(context->hip, (unsigned char*)/* API is not modifying content */src,
+	                size, pcm_l, pcm_r);
 
 	if (rc <= 0)
 		return FALSE;
@@ -353,12 +362,14 @@ static BOOL freerdp_dsp_encode_mp3(FREERDP_DSP_CONTEXT* context,
 	if (!context || !src || !out)
 		return FALSE;
 
+	samples_per_channel = size / context->format.nChannels / context->format.wBitsPerSample / 8;
+
 	/* Ensure worst case buffer size for mp3 stream taken from LAME header */
 	if (!Stream_EnsureRemainingCapacity(out, 1.25 * samples_per_channel + 7200))
 		return FALSE;
 
 	samples_per_channel = size / 2 /* size of a sample */ / context->format.nChannels;
-	rc = lame_encode_buffer_interleaved(context->lame, src, samples_per_channel,
+	rc = lame_encode_buffer_interleaved(context->lame, (short*)src, samples_per_channel,
 	                                    Stream_Pointer(out), Stream_GetRemainingCapacity(out));
 
 	if (rc < 0)
@@ -367,6 +378,66 @@ static BOOL freerdp_dsp_encode_mp3(FREERDP_DSP_CONTEXT* context,
 	Stream_Seek(out, rc);
 	return TRUE;
 }
+#endif
+
+#if defined(WITH_FAAD2)
+static BOOL freerdp_dsp_decode_faad(FREERDP_DSP_CONTEXT* context,
+                                    const BYTE* src, size_t size, wStream* out)
+{
+	NeAACDecFrameInfo info;
+	void* output;
+	size_t offset = 0;
+
+	if (!context || !src || !out)
+		return FALSE;
+
+	if (!context->faadSetup)
+	{
+		unsigned long samplerate;
+		unsigned char channels;
+		char err = NeAACDecInit(context->faad, /* API is not modifying content */(unsigned char*)src,
+		                        size, &samplerate, &channels);
+
+		if (err != 0)
+			return FALSE;
+
+		if (channels != context->format.nChannels)
+			return FALSE;
+
+		if (samplerate != context->format.nSamplesPerSec)
+			return FALSE;
+
+		context->faadSetup = TRUE;
+	}
+
+	while (offset < size)
+	{
+		size_t outSize;
+		void* sample_buffer;
+		outSize = context->format.nSamplesPerSec * context->format.nChannels *
+		          context->format.wBitsPerSample / 8;
+
+		if (!Stream_EnsureRemainingCapacity(out, outSize))
+			return FALSE;
+
+		sample_buffer = Stream_Pointer(out);
+		output = NeAACDecDecode2(context->faad, &info, (unsigned char*)&src[offset], size - offset,
+		                         &sample_buffer, Stream_GetRemainingCapacity(out));
+
+		if (info.error != 0)
+			return FALSE;
+
+		offset += info.bytesconsumed;
+
+		if (info.samples == 0)
+			continue;
+
+		Stream_Seek(out, info.samples * info.channels * context->format.wBitsPerSample / 8);
+	}
+
+	return TRUE;
+}
+
 #endif
 
 /**
@@ -808,6 +879,17 @@ FREERDP_DSP_CONTEXT* freerdp_dsp_context_new(BOOL encoder)
 	}
 
 #endif
+#if defined(WITH_FAAD2)
+
+	if (!encoder)
+	{
+		context->faad = NeAACDecOpen();
+
+		if (!context->faad)
+			goto fail;
+	}
+
+#endif
 	return context;
 fail:
 	freerdp_dsp_context_free(context);
@@ -832,6 +914,12 @@ void freerdp_dsp_context_free(FREERDP_DSP_CONTEXT* context)
 			lame_close(context->lame);
 		else
 			hip_decode_exit(context->hip);
+
+#endif
+#if defined(WITH_FAAD2)
+
+		if (!context->encoder)
+			NeAACDecClose(context->faad);
 
 #endif
 		free(context);
@@ -919,6 +1007,11 @@ BOOL freerdp_dsp_decode(FREERDP_DSP_CONTEXT* context, const AUDIO_FORMAT* srcFor
 		case WAVE_FORMAT_MPEGLAYER3:
 			return freerdp_dsp_decode_mp3(context, data, length, out);
 #endif
+#if defined(WITH_FAAD2)
+
+		case WAVE_FORMAT_AAC_MS:
+			return freerdp_dsp_decode_faad(context, data, length, out);
+#endif
 
 		default:
 			return FALSE;
@@ -951,6 +1044,13 @@ BOOL freerdp_dsp_supports_format(const AUDIO_FORMAT* format, BOOL encode)
 			return TRUE;
 #endif
 
+		case WAVE_FORMAT_AAC_MS:
+#if defined(WITH_FAAD2)
+			if (!encode)
+				return TRUE;
+
+#endif
+
 		default:
 			return FALSE;
 	}
@@ -970,6 +1070,9 @@ BOOL freerdp_dsp_context_reset(FREERDP_DSP_CONTEXT* context, const AUDIO_FORMAT*
 		return FALSE;
 
 	context->format = *targetFormat;
+#if defined(WITH_FAAD2)
+	context->faadSetup = FALSE;
+#endif
 	return TRUE;
 #endif
 }

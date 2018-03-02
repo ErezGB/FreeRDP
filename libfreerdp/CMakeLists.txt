@@ -172,6 +172,11 @@ if(LAME_FOUND)
 	include_directories(${LAME_INCLUDE_DIR})
 endif()
 
+if(FAAD2_FOUND)
+	freerdp_library_add(${FAAD2_LIBRARIES})
+	include_directories(${FAAD2_INCLUDE_DIR})
+endif()
+
 if(WITH_NEON)
 	set_source_files_properties(${CODEC_NEON_SRCS} PROPERTIES COMPILE_FLAGS "-mfpu=neon -Wno-unused-variable" )
 	set(CODEC_SRCS ${CODEC_SRCS} ${CODEC_NEON_SRCS})
