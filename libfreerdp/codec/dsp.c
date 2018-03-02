@@ -258,6 +258,50 @@ static BOOL freerdp_dsp_decode_ima_adpcm(FREERDP_DSP_CONTEXT* context,
 	return TRUE;
 }
 
+#if defined(WITH_GSM)
+static BOOL freerdp_dsp_decode_gsm610(FREERDP_DSP_CONTEXT* context,
+                                      const BYTE* src, size_t size, wStream* out)
+{
+	size_t offset = 0;
+
+	while (offset < size)
+	{
+		gsm_signal gsmBlockBuffer[160] = { 0 };
+		gsm_decode(context->gsm, (gsm_byte*) &src[offset], gsmBlockBuffer);
+		offset += sizeof(gsm_frame);
+
+		if (!Stream_EnsureRemainingCapacity(out, sizeof(gsmBlockBuffer)))
+			return FALSE;
+
+		Stream_Write(out, (void*) gsmBlockBuffer, sizeof(gsmBlockBuffer));
+	}
+
+	return TRUE;
+}
+
+static BOOL freerdp_dsp_encode_gsm610(FREERDP_DSP_CONTEXT* context,
+                                      const BYTE* src, size_t size, wStream* out)
+{
+	{
+		size_t offset = 0;
+
+		while (offset < size)
+		{
+			gsm_signal* signal = (gsm_signal*)&src[offset];
+
+			if (!Stream_EnsureRemainingCapacity(out, sizeof(gsm_frame)))
+				return FALSE;
+
+			gsm_encode(context->gsm, signal, Stream_Pointer(out));
+			Stream_Seek(out, sizeof(gsm_frame));
+			offset += 160;
+		}
+
+		return TRUE;
+	}
+}
+#endif
+
 /**
  * 0     1     2     3
  * 2 0   6 4   10 8  14 12   <left>
@@ -732,23 +776,7 @@ BOOL freerdp_dsp_encode(FREERDP_DSP_CONTEXT* context, const AUDIO_FORMAT* srcFor
 #if defined(WITH_GSM)
 
 		case WAVE_FORMAT_GSM610:
-			{
-				size_t offset = 0;
-
-				while (offset < length)
-				{
-					gsm_signal* signal = (gsm_signal*)&data[offset];
-
-					if (!Stream_EnsureRemainingCapacity(out, sizeof(gsm_frame)))
-						return FALSE;
-
-					gsm_encode(context->gsm, signal, Stream_Buffer(out));
-					Stream_Seek(out, sizeof(gsm_frame));
-				}
-
-				return TRUE;
-			}
-
+			return freerdp_dsp_encode_gsm610(context, data, length, out);
 #endif
 
 		default:
@@ -786,24 +814,7 @@ BOOL freerdp_dsp_decode(FREERDP_DSP_CONTEXT* context, const AUDIO_FORMAT* srcFor
 #if defined(WITH_GSM)
 
 		case WAVE_FORMAT_GSM610:
-			{
-				size_t offset = 0;
-
-				while (offset < length)
-				{
-					gsm_signal gsmBlockBuffer[160] = { 0 };
-					gsm_decode(context->gsm, (gsm_byte*) &data[offset], gsmBlockBuffer);
-					offset += 33;
-
-					if (!Stream_EnsureRemainingCapacity(out, sizeof(gsmBlockBuffer)))
-						return FALSE;
-
-					Stream_Write(out, (void*) gsmBlockBuffer, sizeof(gsmBlockBuffer));
-				}
-
-				return TRUE;
-			}
-
+			return freerdp_dsp_decode_gsm610(context, data, length, out);
 #endif
 
 		default:
@@ -829,7 +840,7 @@ BOOL freerdp_dsp_supports_format(const AUDIO_FORMAT* format, BOOL encode)
 #if defined(WITH_GSM)
 
 		case WAVE_FORMAT_GSM610:
-			return !encode;
+			return TRUE;
 #endif
 
 		default:
